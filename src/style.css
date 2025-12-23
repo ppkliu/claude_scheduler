@@ -1,0 +1,111 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Light theme - 預設 */
+    --background: 0 0% 100%;           /* #FFFFFF */
+    --foreground: 222 47% 11%;         /* #1A1F2E */
+    --card: 0 0% 98%;                  /* #FAFAFA */
+    --card-foreground: 222 47% 11%;
+    --primary: 142 76% 36%;            /* #22C55E - 綠色保持 */
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 40% 96%;          /* #F1F5F9 */
+    --secondary-foreground: 222 47% 11%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;   /* #64748B */
+    --accent: 142 76% 36%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 84% 60%;          /* #F87171 */
+    --destructive-foreground: 0 0% 100%;
+    --border: 214 32% 91%;             /* #E2E8F0 */
+    --input: 214 32% 91%;
+    --ring: 142 76% 36%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    /* Dark theme - 暗色主題 */
+    --background: 222 47% 6%;
+    --foreground: 210 40% 98%;
+    --card: 222 47% 8%;
+    --card-foreground: 210 40% 98%;
+    --primary: 142 76% 36%;
+    --primary-foreground: 355 100% 100%;
+    --secondary: 217 33% 17%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217 33% 17%;
+    --muted-foreground: 215 20% 55%;
+    --accent: 142 76% 36%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 63% 51%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217 33% 17%;
+    --input: 217 33% 17%;
+    --ring: 142 76% 36%;
+  }
+
+  /* 主題切換平滑過渡 */
+  * {
+    transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Noto Sans TC', 'JetBrains Mono', system-ui, sans-serif;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-secondary/50 rounded;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-muted-foreground/30 rounded hover:bg-muted-foreground/50;
+}
+
+/* Terminal-like font for code/numbers */
+.font-mono {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* Animations */
+@keyframes pulse-glow {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(34, 197, 94, 0);
+  }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s infinite;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out;
+}
