@@ -1,0 +1,2244 @@
+import { createServer, IncomingMessage, ServerResponse } from 'http'
+import Database from 'better-sqlite3'
+import cron, { ScheduledTask } from 'node-cron'
+import { spawn } from 'child_process'
+import { resolve, join } from 'path'
+import { createReadStream, existsSync, readdirSync, readFileSync, statSync } from 'fs'
+import { createInterface } from 'readline'
+import { homedir } from 'os'
+import { createHash } from 'crypto'
+
+// ============ Database Setup ============
+const dbPath = resolve(process.cwd(), 'scheduler.db')
+const db = new Database(dbPath)
+
+// Initialize database schema
+function initializeDatabase() {
+  // Create tables
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schedules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      cron_expression TEXT NOT NULL,
+      hour INTEGER NOT NULL,
+      minute INTEGER NOT NULL DEFAULT 0,
+      enabled INTEGER DEFAULT 1,
+      prompt TEXT NOT NULL DEFAULT 'hi',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS execution_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      schedule_id INTEGER,
+      schedule_name TEXT,
+      executed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      status TEXT DEFAULT 'pending',
+      input_tokens INTEGER DEFAULT 0,
+      output_tokens INTEGER DEFAULT 0,
+      total_tokens INTEGER DEFAULT 0,
+      cost_usd REAL DEFAULT 0,
+      duration_ms INTEGER DEFAULT 0,
+      response TEXT,
+      error TEXT,
+      FOREIGN KEY (schedule_id) REFERENCES schedules(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS conversations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      execution_log_id INTEGER,
+      session_id TEXT,
+      project_path TEXT,
+      user_prompt TEXT NOT NULL,
+      assistant_response TEXT,
+      category TEXT DEFAULT 'uncategorized',
+      tags TEXT,
+      source TEXT NOT NULL,
+      executed_at TEXT NOT NULL,
+      prompt_hash TEXT,
+      categorized_at TEXT,
+      input_tokens INTEGER DEFAULT 0,
+      output_tokens INTEGER DEFAULT 0,
+      total_tokens INTEGER DEFAULT 0,
+      cost_usd REAL DEFAULT 0,
+      duration_ms INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (execution_log_id) REFERENCES execution_logs(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS config (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS project_sync_status (
+      project_path TEXT PRIMARY KEY,
+      last_sync_timestamp TEXT NOT NULL,
+      last_synced_file TEXT,
+      total_conversations_synced INTEGER DEFAULT 0,
+      last_sync_status TEXT DEFAULT 'success',
+      last_sync_error TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_logs_schedule ON execution_logs(schedule_id);
+    CREATE INDEX IF NOT EXISTS idx_logs_date ON execution_logs(executed_at);
+    CREATE INDEX IF NOT EXISTS idx_conversations_date ON conversations(executed_at);
+    CREATE INDEX IF NOT EXISTS idx_conversations_category ON conversations(category);
+    CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_id);
+    CREATE INDEX IF NOT EXISTS idx_conversations_source ON conversations(source);
+    CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_path);
+    CREATE INDEX IF NOT EXISTS idx_sync_status_timestamp ON project_sync_status(last_sync_timestamp);
+  `)
+
+  // Migrate schema: Add missing columns if they don't exist
+  try {
+    // Check if prompt_hash column exists in conversations table
+    const tableInfo = db.prepare("PRAGMA table_info(conversations)").all() as Array<{name: string}>
+    const hasPromptHash = tableInfo.some(col => col.name === 'prompt_hash')
+
+    if (!hasPromptHash) {
+      console.log('[Migration] Adding prompt_hash column to conversations table...')
+      db.exec(`ALTER TABLE conversations ADD COLUMN prompt_hash TEXT`)
+    }
+
+    // Try to drop the unique index if it exists (in case it was created with bad data)
+    try {
+      db.exec(`DROP INDEX IF EXISTS idx_conversations_unique`)
+    } catch (e) {
+      // Index might not exist, that's fine
+    }
+
+    // Recreate unique index (will fail silently if data has duplicates, but we'll skip it)
+    try {
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_unique
+        ON conversations(session_id, executed_at, prompt_hash)`)
+      console.log('[Migration] Unique index created successfully')
+    } catch (e) {
+      // Index creation might fail if there are duplicate values
+      // This is okay - we'll just skip the unique constraint for now
+      console.log('[Migration] Could not create unique index (data may have duplicates):', (e as Error).message)
+    }
+  } catch (e) {
+    console.error('[Migration] Schema migration error:', e)
+  }
+}
+
+initializeDatabase()
+
+// ============ Utility Functions ============
+/**
+ * Generate SHA-256 hash of first 200 characters of a prompt
+ */
+function generatePromptHash(prompt: string): string {
+  const content = prompt.substring(0, 200)
+  return createHash('sha256').update(content).digest('hex')
+}
+
+/**
+ * Backfill existing conversations with prompt_hash
+ */
+function backfillPromptHashes() {
+  try {
+    const rows = db.prepare('SELECT id, user_prompt FROM conversations WHERE prompt_hash IS NULL LIMIT 1000').all() as Array<{ id: number; user_prompt: string }>
+
+    if (rows.length > 0) {
+      const updateStmt = db.prepare('UPDATE conversations SET prompt_hash = ? WHERE id = ?')
+      let updated = 0
+      let failed = 0
+
+      for (const row of rows) {
+        try {
+          const hash = generatePromptHash(row.user_prompt)
+          updateStmt.run(hash, row.id)
+          updated++
+        } catch (e) {
+          // Skip rows that would violate unique constraint
+          console.warn('[Backfill] Skipped row due to constraint:', (e as Error).message)
+          failed++
+        }
+      }
+
+      console.log(`[Backfill] Updated ${updated} conversations with prompt_hash (${failed} skipped)`)
+    }
+  } catch (error) {
+    console.error('[Backfill] Error backfilling prompt hashes:', error)
+  }
+}
+
+// Run backfill migration on startup
+backfillPromptHashes()
+
+// ============ Scheduler Manager ============
+const scheduledTasks = new Map<number, ScheduledTask>()
+
+interface Schedule {
+  id: number
+  name: string
+  cron_expression: string
+  hour: number
+  minute: number
+  enabled: number
+  prompt: string
+  created_at: string
+  updated_at: string
+}
+
+interface HistoryEntry {
+  display: string
+  pastedContents: Record<string, unknown>
+  timestamp: number
+  project?: string
+  sessionId?: string
+}
+
+interface ExecutionLog {
+  id: number
+  schedule_id?: number
+  schedule_name: string
+  executed_at: string
+  status: string
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  cost_usd: number
+  duration_ms: number
+  response: string
+  error?: string
+}
+
+interface MergedConversation {
+  historyEntry: HistoryEntry | null
+  executionLog: ExecutionLog | null
+  matchType: 'exact' | 'fuzzy' | 'none'
+  timeDiff: number
+}
+
+interface ConversationGroup {
+  date: string
+  label: string
+  conversations: unknown[]
+  count: number
+}
+
+// 最省 token 的 prompt - 只說 "hi"
+const MINIMAL_PROMPT = 'hi'
+
+// Claude Code CLI 執行選項
+interface ClaudeCodeOptions {
+  permissionMode?: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions'
+  skipPermissions?: boolean
+  maxTurns?: number
+  outputFormat?: 'text' | 'json' | 'stream-json'
+}
+
+async function executeClaudeCode(scheduleId: number, scheduleName: string, prompt: string): Promise<void> {
+  const startTime = Date.now()
+  
+  // 建立 pending log
+  const insertLog = db.prepare(`
+    INSERT INTO execution_logs (schedule_id, schedule_name, status, response)
+    VALUES (?, ?, 'pending', '')
+  `)
+  const result = insertLog.run(scheduleId, scheduleName)
+  const logId = result.lastInsertRowid
+
+  try {
+    // 使用 claude CLI 執行對話 - 使用最省 token 的設定
+    const response = await runClaudeCommand(prompt, {
+      maxTurns: 1,              // 限制單輪對話
+      outputFormat: 'text',     // 純文字輸出
+      skipPermissions: true     // 跳過權限提示以減少互動
+    })
+    const durationMs = Date.now() - startTime
+
+    // 解析 token 使用量 (從 response 中提取或估算)
+    const tokenEstimate = estimateTokens(prompt, response)
+
+    // 更新 log
+    const updateLog = db.prepare(`
+      UPDATE execution_logs 
+      SET status = 'success',
+          input_tokens = ?,
+          output_tokens = ?,
+          total_tokens = ?,
+          cost_usd = ?,
+          duration_ms = ?,
+          response = ?
+      WHERE id = ?
+    `)
+    updateLog.run(
+      tokenEstimate.input,
+      tokenEstimate.output,
+      tokenEstimate.total,
+      tokenEstimate.cost,
+      durationMs,
+      response.substring(0, 10000), // 限制儲存長度
+      logId
+    )
+
+    console.log(`[${new Date().toISOString()}] ✅ Schedule "${scheduleName}" executed successfully`)
+    console.log(`   Tokens: ${tokenEstimate.total} | Cost: $${tokenEstimate.cost.toFixed(6)} | Duration: ${durationMs}ms`)
+
+  } catch (error) {
+    const durationMs = Date.now() - startTime
+    const errorMessage = error instanceof Error ? error.message : String(error)
+
+    const updateLog = db.prepare(`
+      UPDATE execution_logs 
+      SET status = 'failed',
+          duration_ms = ?,
+          error = ?
+      WHERE id = ?
+    `)
+    updateLog.run(durationMs, errorMessage, logId)
+
+    console.error(`[${new Date().toISOString()}] ❌ Schedule "${scheduleName}" failed: ${errorMessage}`)
+  }
+}
+
+function runClaudeCommand(prompt: string, options: ClaudeCodeOptions = {}): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const args: string[] = ['-p', prompt]
+    
+    // 輸出格式
+    args.push('--output-format', options.outputFormat || 'text')
+    
+    // 權限模式 - Pro 訂閱下建議使用 plan 模式做最小對話
+    if (options.skipPermissions) {
+      args.push('--dangerously-skip-permissions')
+    }
+    
+    // 限制對話輪數 - 減少 token 消耗
+    if (options.maxTurns) {
+      args.push('--max-turns', options.maxTurns.toString())
+    }
+
+    console.log(`[Claude] Running: claude ${args.join(' ')}`)
+
+    // 使用 claude CLI 執行
+    const claude = spawn('claude', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env }
+    })
+
+    let stdout = ''
+    let stderr = ''
+
+    claude.stdout.on('data', (data) => {
+      stdout += data.toString()
+    })
+
+    claude.stderr.on('data', (data) => {
+      stderr += data.toString()
+    })
+
+    claude.on('close', (code) => {
+      if (code === 0) {
+        resolve(stdout.trim())
+      } else {
+        reject(new Error(stderr || `Claude exited with code ${code}`))
+      }
+    })
+
+    claude.on('error', (err) => {
+      reject(err)
+    })
+
+    // 設定 30 秒超時
+    setTimeout(() => {
+      claude.kill()
+      reject(new Error('Claude command timeout after 30s'))
+    }, 30000)
+  })
+}
+
+function estimateTokens(input: string, output: string) {
+  // 粗略估算: 1 token ≈ 4 字元 (英文) 或 1.5 字元 (中文混合)
+  const inputTokens = Math.ceil(input.length / 3)
+  const outputTokens = Math.ceil(output.length / 3)
+  const totalTokens = inputTokens + outputTokens
+
+  // Claude 3.5 Sonnet 價格估算
+  // Input: $3/M tokens, Output: $15/M tokens
+  const cost = (inputTokens * 3 + outputTokens * 15) / 1000000
+
+  return {
+    input: inputTokens,
+    output: outputTokens,
+    total: totalTokens,
+    cost
+  }
+}
+
+// ============ Conversation History Utilities ============
+
+async function readHistory(limit = 100, project?: string, pathIndex = 0): Promise<HistoryEntry[]> {
+  // Get configured paths from config table, fallback to default
+  let historyPath = join(homedir(), '.claude', 'history.jsonl')
+
+  console.log('[ReadHistory] Default path:', historyPath)
+  console.log('[ReadHistory] Home dir:', homedir())
+  console.log('[ReadHistory] Checking config...')
+
+  try {
+    const configRow = db.prepare('SELECT value FROM config WHERE key = ?').get('history_paths') as { value: string } | undefined
+    if (configRow?.value) {
+      try {
+        const paths = JSON.parse(configRow.value) as string[]
+        if (Array.isArray(paths) && paths[pathIndex]) {
+          historyPath = paths[pathIndex]
+          console.log('[ReadHistory] Using configured path:', historyPath)
+        }
+      } catch (e) {
+        console.error('[ReadHistory] Failed to parse paths config:', e)
+      }
+    }
+  } catch (e) {
+    // Config table might not exist yet, use default
+    console.log('[ReadHistory] Using default history path:', historyPath)
+  }
+
+  console.log('[ReadHistory] Using path:', historyPath)
+  console.log('[ReadHistory] File exists:', existsSync(historyPath))
+
+  if (!existsSync(historyPath)) {
+    console.log('[ReadHistory] History file not found:', historyPath)
+    return []
+  }
+
+  const entries: HistoryEntry[] = []
+
+  // Read file line by line and parse JSONL format
+  // From bottom (newest data) to get most recent entries first
+  const fileStream = createReadStream(historyPath)
+  const rl = createInterface({
+    input: fileStream,
+    crlfDelay: Infinity
+  })
+
+  const allLines: string[] = []
+
+  // First pass: collect all lines
+  for await (const line of rl) {
+    if (line.trim()) {
+      allLines.push(line)
+    }
+  }
+
+  // Second pass: parse from newest (bottom) first
+  console.log(`[History] Found ${allLines.length} lines in history file`)
+
+  let validEntries = 0
+  let invalidTimestamp = 0
+  let invalidDisplay = 0
+  let parseErrors = 0
+
+  for (let i = allLines.length - 1; i >= 0 && entries.length < limit; i--) {
+    const line = allLines[i]
+    try {
+      const entry = JSON.parse(line) as HistoryEntry
+
+      // Validate entry has required fields
+      if (!entry.timestamp || typeof entry.timestamp !== 'number') {
+        invalidTimestamp++
+        console.warn('[History] Invalid entry - missing/invalid timestamp:', line.substring(0, 100))
+        continue
+      }
+
+      // CRITICAL: Verify display field exists (this is the user prompt!)
+      if (!entry.display || entry.display.trim() === '') {
+        invalidDisplay++
+        console.warn('[History] Invalid entry - empty/missing display field:', {
+          timestamp: entry.timestamp,
+          sessionId: entry.sessionId,
+          hasDisplay: !!entry.display,
+          displayLength: entry.display?.length,
+          allKeys: Object.keys(entry)
+        })
+        continue
+      }
+
+      validEntries++
+
+      // Log first entry sample to verify JSONL format parsing
+      if (entries.length === 0) {
+        console.log('[History] First entry sample (newest):', {
+          display: entry.display.substring(0, 100) + (entry.display.length > 100 ? '...' : ''),
+          timestamp: entry.timestamp,
+          sessionId: entry.sessionId,
+          project: entry.project,
+          hasDisplay: !!entry.display,
+          displayLength: entry.display.length
+        })
+      }
+
+      // Filter by project if specified
+      if (project && entry.project !== project) continue
+
+      entries.push(entry)
+    } catch (e) {
+      // Skip malformed lines
+      parseErrors++
+      console.warn('[History] Failed to parse JSON line:', (e as Error).message, line.substring(0, 100))
+    }
+  }
+
+  // Entries are already in reverse chronological order (newest first)
+  console.log('[History] ========== FINAL SUMMARY ==========')
+  console.log(`Total lines in file: ${allLines.length}`)
+  console.log(`Valid entries: ${validEntries}`)
+  console.log(`Invalid timestamp: ${invalidTimestamp}`)
+  console.log(`Invalid/missing display: ${invalidDisplay}`)
+  console.log(`Parse errors: ${parseErrors}`)
+  console.log(`Entries returned: ${entries.length}/${limit}`)
+  console.log('=======================================')
+  return entries
+}
+
+function correlateConversations(
+  historyEntries: HistoryEntry[],
+  executionLogs: ExecutionLog[],
+  timeWindowSeconds = 300
+): MergedConversation[] {
+  const merged: MergedConversation[] = []
+  const usedLogIds = new Set<number>()
+
+  // For each history entry, find closest execution log
+  for (const historyEntry of historyEntries) {
+    const historyTime = historyEntry.timestamp
+    let closestLog: ExecutionLog | null = null
+    let minTimeDiff = Infinity
+
+    for (const log of executionLogs) {
+      if (usedLogIds.has(log.id)) continue
+
+      const logTime = new Date(log.executed_at).getTime()
+      const timeDiff = Math.abs(historyTime - logTime) / 1000 // seconds
+
+      if (timeDiff < minTimeDiff && timeDiff < timeWindowSeconds) {
+        minTimeDiff = timeDiff
+        closestLog = log
+      }
+    }
+
+    if (closestLog) {
+      usedLogIds.add(closestLog.id)
+      merged.push({
+        historyEntry,
+        executionLog: closestLog,
+        matchType: minTimeDiff < 5 ? 'exact' : 'fuzzy',
+        timeDiff: minTimeDiff
+      })
+    } else {
+      // Unmatched history entry
+      merged.push({
+        historyEntry,
+        executionLog: null,
+        matchType: 'none',
+        timeDiff: 0
+      })
+    }
+  }
+
+  // Add unmatched execution logs
+  for (const log of executionLogs) {
+    if (!usedLogIds.has(log.id)) {
+      merged.push({
+        historyEntry: null,
+        executionLog: log,
+        matchType: 'none',
+        timeDiff: 0
+      })
+    }
+  }
+
+  return merged
+}
+
+function getDayLabel(date: string): string {
+  const targetDate = new Date(date + 'T00:00:00Z')
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+
+  const diffTime = today.getTime() - targetDate.getTime()
+  const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24))
+
+  if (diffDays === 0) return '今天'
+  if (diffDays === 1) return '昨天'
+  if (diffDays <= 7) return `${diffDays}天前`
+  if (diffDays <= 30) return `${Math.floor(diffDays / 7)}週前`
+  return `${Math.floor(diffDays / 30)}個月前`
+}
+
+function groupByDay(conversations: unknown[]): ConversationGroup[] {
+  const groups = new Map<string, unknown[]>()
+
+  for (const conv of conversations as Array<Record<string, unknown>>) {
+    const executedAt = conv.executed_at as string
+    const date = executedAt.split('T')[0]
+    if (!groups.has(date)) {
+      groups.set(date, [])
+    }
+    groups.get(date)!.push(conv)
+  }
+
+  return Array.from(groups.entries())
+    .map(([date, conversations]) => ({
+      date,
+      label: getDayLabel(date),
+      conversations,
+      count: conversations.length
+    }))
+    .sort((a, b) => b.date.localeCompare(a.date))
+}
+
+// 按日期分組且支持日內排序
+function groupByDayWithSort(conversations: unknown[], sortOrder: 'asc' | 'desc' = 'desc'): ConversationGroup[] {
+  const groups = new Map<string, unknown[]>()
+
+  for (const conv of conversations as Array<Record<string, unknown>>) {
+    const executedAt = conv.executed_at as string
+    const date = executedAt.split('T')[0]
+    if (!groups.has(date)) {
+      groups.set(date, [])
+    }
+    groups.get(date)!.push(conv)
+  }
+
+  return Array.from(groups.entries())
+    .map(([date, conversations]) => {
+      // 對每個日期分組內的對話按指定順序排序
+      const sorted = [...conversations].sort((a, b) => {
+        const timeA = new Date((a as any).executed_at).getTime()
+        const timeB = new Date((b as any).executed_at).getTime()
+        return sortOrder === 'asc' ? timeA - timeB : timeB - timeA
+      })
+
+      return {
+        date,
+        label: getDayLabel(date),
+        conversations: sorted,
+        count: sorted.length
+      }
+    })
+    .sort((a, b) => b.date.localeCompare(a.date)) // 日期始終按降序（最新日期在前）
+}
+
+// ============ Projects JSONL Import Functions ============
+
+function readProjectsJSONL(projectPath: string, sessionId: string): {
+  userMessages: Array<{uuid: string, content: string, timestamp: string, sessionId: string}>,
+  assistantMessages: Array<{uuid: string, parentUuid: string, content: string, timestamp: string, sessionId: string, usage: any}>
+} {
+  const filePath = join(homedir(), '.claude', 'projects', projectPath, `${sessionId}.jsonl`)
+
+  if (!existsSync(filePath)) {
+    console.warn(`[readProjectsJSONL] File not found: ${filePath}`)
+    return { userMessages: [], assistantMessages: [] }
+  }
+
+  const content = readFileSync(filePath, 'utf-8')
+  const lines = content.split('\n').filter(l => l.trim())
+
+  const userMessages: Array<{uuid: string, content: string, timestamp: string, sessionId: string}> = []
+  const assistantMessages: Array<{uuid: string, parentUuid: string, content: string, timestamp: string, sessionId: string, usage: any}> = []
+
+  for (const line of lines) {
+    try {
+      const entry = JSON.parse(line)
+
+      if (entry.type === 'user' && entry.message?.role === 'user') {
+        let content = ''
+        if (typeof entry.message.content === 'string') {
+          content = entry.message.content
+        } else if (Array.isArray(entry.message.content)) {
+          content = entry.message.content
+            .filter((c: any) => c.type === 'text')
+            .map((c: any) => c.text)
+            .join('\n')
+        }
+
+        if (content.trim()) {
+          userMessages.push({
+            uuid: entry.uuid,
+            content,
+            timestamp: entry.timestamp,
+            sessionId: entry.sessionId
+          })
+        }
+      }
+
+      if (entry.type === 'assistant' && entry.message?.role === 'assistant') {
+        let responseText = ''
+        if (Array.isArray(entry.message.content)) {
+          responseText = entry.message.content
+            .filter((c: any) => c.type === 'text')
+            .map((c: any) => c.text)
+            .join('\n')
+        }
+
+        if (responseText.trim()) {
+          assistantMessages.push({
+            uuid: entry.uuid,
+            parentUuid: entry.parentUuid,
+            content: responseText,
+            timestamp: entry.timestamp,
+            sessionId: entry.sessionId,
+            usage: entry.message.usage || {}
+          })
+        }
+      }
+    } catch (e) {
+      console.error(`[readProjectsJSONL] Failed to parse line: ${e}`)
+      continue
+    }
+  }
+
+  console.log(`[readProjectsJSONL] ${sessionId}: Found ${userMessages.length} user messages, ${assistantMessages.length} assistant messages`)
+
+  return { userMessages, assistantMessages }
+}
+
+function pairConversations(userMessages: any[], assistantMessages: any[], projectPath?: string) {
+  const conversations = []
+
+  for (const user of userMessages) {
+    const assistant = assistantMessages.find((a: any) => a.parentUuid === user.uuid)
+
+    conversations.push({
+      sessionId: user.sessionId,
+      projectPath: projectPath, // 添加專案路徑
+      userPrompt: user.content,
+      assistantResponse: assistant?.content || null,
+      executedAt: user.timestamp,
+      inputTokens: assistant?.usage?.input_tokens || 0,
+      outputTokens: assistant?.usage?.output_tokens || 0,
+      totalTokens: (assistant?.usage?.input_tokens || 0) + (assistant?.usage?.output_tokens || 0),
+      costUsd: 0, // TODO: Calculate based on model
+      source: 'history_import',
+      category: 'uncategorized'
+    })
+  }
+
+  return conversations
+}
+
+function setupSchedule(schedule: Schedule): void {
+  if (scheduledTasks.has(schedule.id)) {
+    scheduledTasks.get(schedule.id)?.stop()
+  }
+
+  if (!schedule.enabled) return
+
+  const task = cron.schedule(schedule.cron_expression, () => {
+    executeClaudeCode(schedule.id, schedule.name, schedule.prompt)
+  }, {
+    timezone: 'Asia/Taipei'
+  })
+
+  scheduledTasks.set(schedule.id, task)
+  console.log(`📅 Schedule "${schedule.name}" set for ${schedule.cron_expression}`)
+}
+
+function initializeSchedules(): void {
+  const schedules = db.prepare('SELECT * FROM schedules WHERE enabled = 1').all() as Schedule[]
+  
+  for (const schedule of schedules) {
+    setupSchedule(schedule)
+  }
+  
+  console.log(`\n🚀 Initialized ${schedules.length} schedule(s)\n`)
+}
+
+// ============ API Handlers ============
+function jsonResponse(res: ServerResponse, data: unknown, status = 200): void {
+  res.writeHead(status, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify(data))
+}
+
+function parseBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    let body = ''
+    req.on('data', chunk => body += chunk)
+    req.on('end', () => {
+      try {
+        resolve(body ? JSON.parse(body) : {})
+      } catch {
+        reject(new Error('Invalid JSON'))
+      }
+    })
+    req.on('error', reject)
+  })
+}
+
+async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const url = new URL(req.url || '/', `http://${req.headers.host}`)
+  const path = url.pathname
+  const method = req.method || 'GET'
+
+  // CORS
+  res.setHeader('Access-Control-Allow-Origin', '*')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+
+  if (method === 'OPTIONS') {
+    res.writeHead(204)
+    res.end()
+    return
+  }
+
+  try {
+    // GET /api/schedules - 取得所有排程
+    if (path === '/api/schedules' && method === 'GET') {
+      const schedules = db.prepare('SELECT * FROM schedules ORDER BY hour, minute').all()
+      jsonResponse(res, { success: true, data: schedules })
+      return
+    }
+
+    // POST /api/schedules - 建立排程
+    if (path === '/api/schedules' && method === 'POST') {
+      const body = await parseBody(req)
+      const { name, hour, minute = 0, enabled = true, prompt = MINIMAL_PROMPT } = body as {
+        name: string
+        hour: number
+        minute?: number
+        enabled?: boolean
+        prompt?: string
+      }
+
+      const cronExpression = `${minute} ${hour} * * *`
+      
+      const insert = db.prepare(`
+        INSERT INTO schedules (name, cron_expression, hour, minute, enabled, prompt)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `)
+      const result = insert.run(name, cronExpression, hour, minute, enabled ? 1 : 0, prompt)
+      
+      const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(result.lastInsertRowid) as Schedule
+      setupSchedule(schedule)
+
+      jsonResponse(res, { success: true, data: schedule }, 201)
+      return
+    }
+
+    // PUT /api/schedules/:id - 更新排程
+    if (path.match(/^\/api\/schedules\/\d+$/) && method === 'PUT') {
+      const id = parseInt(path.split('/').pop()!)
+      const body = await parseBody(req)
+      const { name, hour, minute = 0, enabled, prompt } = body as {
+        name?: string
+        hour?: number
+        minute?: number
+        enabled?: boolean
+        prompt?: string
+      }
+
+      const existing = db.prepare('SELECT * FROM schedules WHERE id = ?').get(id) as Schedule
+      if (!existing) {
+        jsonResponse(res, { success: false, error: 'Schedule not found' }, 404)
+        return
+      }
+
+      const newHour = hour ?? existing.hour
+      const newMinute = minute ?? existing.minute
+      const cronExpression = `${newMinute} ${newHour} * * *`
+
+      const update = db.prepare(`
+        UPDATE schedules 
+        SET name = ?, cron_expression = ?, hour = ?, minute = ?, enabled = ?, prompt = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `)
+      update.run(
+        name ?? existing.name,
+        cronExpression,
+        newHour,
+        newMinute,
+        enabled !== undefined ? (enabled ? 1 : 0) : existing.enabled,
+        prompt ?? existing.prompt,
+        id
+      )
+
+      const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(id) as Schedule
+      setupSchedule(schedule)
+
+      jsonResponse(res, { success: true, data: schedule })
+      return
+    }
+
+    // DELETE /api/schedules/:id - 刪除排程
+    if (path.match(/^\/api\/schedules\/\d+$/) && method === 'DELETE') {
+      const id = parseInt(path.split('/').pop()!)
+      
+      scheduledTasks.get(id)?.stop()
+      scheduledTasks.delete(id)
+      
+      db.prepare('DELETE FROM schedules WHERE id = ?').run(id)
+      jsonResponse(res, { success: true })
+      return
+    }
+
+    // POST /api/schedules/:id/execute - 立即執行排程
+    if (path.match(/^\/api\/schedules\/\d+\/execute$/) && method === 'POST') {
+      const id = parseInt(path.split('/')[3])
+      const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(id) as Schedule
+      
+      if (!schedule) {
+        jsonResponse(res, { success: false, error: 'Schedule not found' }, 404)
+        return
+      }
+
+      // 非同步執行，立即回應
+      executeClaudeCode(schedule.id, schedule.name, schedule.prompt)
+      jsonResponse(res, { success: true, message: 'Execution started' })
+      return
+    }
+
+    // GET /api/logs - 取得執行記錄
+    if (path === '/api/logs' && method === 'GET') {
+      const limit = parseInt(url.searchParams.get('limit') || '50')
+      const offset = parseInt(url.searchParams.get('offset') || '0')
+      
+      const logs = db.prepare(`
+        SELECT * FROM execution_logs 
+        ORDER BY executed_at DESC 
+        LIMIT ? OFFSET ?
+      `).all(limit, offset)
+      
+      const total = (db.prepare('SELECT COUNT(*) as count FROM execution_logs').get() as { count: number }).count
+
+      jsonResponse(res, { success: true, data: { logs, total, limit, offset } })
+      return
+    }
+
+    // GET /api/stats - 取得統計資料
+    if (path === '/api/stats' && method === 'GET') {
+      const today = new Date().toISOString().split('T')[0]
+      
+      const todayStats = db.prepare(`
+        SELECT 
+          COUNT(*) as execution_count,
+          SUM(input_tokens) as total_input_tokens,
+          SUM(output_tokens) as total_output_tokens,
+          SUM(total_tokens) as total_tokens,
+          SUM(cost_usd) as total_cost_usd
+        FROM execution_logs 
+        WHERE date(executed_at) = ?
+      `).get(today) as {
+        execution_count: number
+        total_input_tokens: number
+        total_output_tokens: number
+        total_tokens: number
+        total_cost_usd: number
+      }
+
+      const lastExecution = db.prepare(`
+        SELECT * FROM execution_logs 
+        ORDER BY executed_at DESC 
+        LIMIT 1
+      `).get()
+
+      const activeSchedules = (db.prepare('SELECT COUNT(*) as count FROM schedules WHERE enabled = 1').get() as { count: number }).count
+
+      // 計算下次執行時間
+      const enabledSchedules = db.prepare('SELECT * FROM schedules WHERE enabled = 1 ORDER BY hour, minute').all() as Schedule[]
+      const now = new Date()
+      const currentMinutes = now.getHours() * 60 + now.getMinutes()
+      
+      let nextExecution = null
+      for (const s of enabledSchedules) {
+        const scheduleMinutes = s.hour * 60 + s.minute
+        if (scheduleMinutes > currentMinutes) {
+          const nextTime = new Date(now)
+          nextTime.setHours(s.hour, s.minute, 0, 0)
+          nextExecution = {
+            scheduleId: s.id,
+            scheduleName: s.name,
+            time: nextTime.toISOString()
+          }
+          break
+        }
+      }
+      // 如果今天沒有更多執行，取明天第一個
+      if (!nextExecution && enabledSchedules.length > 0) {
+        const first = enabledSchedules[0]
+        const nextTime = new Date(now)
+        nextTime.setDate(nextTime.getDate() + 1)
+        nextTime.setHours(first.hour, first.minute, 0, 0)
+        nextExecution = {
+          scheduleId: first.id,
+          scheduleName: first.name,
+          time: nextTime.toISOString()
+        }
+      }
+
+      jsonResponse(res, {
+        success: true,
+        data: {
+          isRunning: true,
+          activeSchedules,
+          nextExecution,
+          lastExecution,
+          todayStats
+        }
+      })
+      return
+    }
+
+    // GET /api/usage - Token 使用量統計
+    if (path === '/api/usage' && method === 'GET') {
+      const days = parseInt(url.searchParams.get('days') || '7')
+
+      const usage = db.prepare(`
+        SELECT
+          date(executed_at) as date,
+          SUM(input_tokens) as total_input_tokens,
+          SUM(output_tokens) as total_output_tokens,
+          SUM(total_tokens) as total_tokens,
+          SUM(cost_usd) as total_cost_usd,
+          COUNT(*) as execution_count
+        FROM execution_logs
+        WHERE executed_at >= datetime('now', '-' || ? || ' days')
+        GROUP BY date(executed_at)
+        ORDER BY date DESC
+      `).all(days)
+
+      jsonResponse(res, { success: true, data: usage })
+      return
+    }
+
+    // POST /api/execute - 快速執行簡單對話
+    if (path === '/api/execute' && method === 'POST') {
+      const body = await parseBody(req)
+      const { prompt = MINIMAL_PROMPT } = body as { prompt?: string }
+
+      const startTime = Date.now()
+
+      // 建立 pending log (無對應排程)
+      const insertLog = db.prepare(`
+        INSERT INTO execution_logs (schedule_id, schedule_name, status, response)
+        VALUES (NULL, 'Quick Chat', 'pending', '')
+      `)
+      const result = insertLog.run()
+      const logId = result.lastInsertRowid
+
+      try {
+        // 執行對話
+        const response = await runClaudeCommand(prompt, {
+          maxTurns: 1,
+          outputFormat: 'text',
+          skipPermissions: true
+        })
+        const durationMs = Date.now() - startTime
+
+        // 估算 token
+        const tokenEstimate = estimateTokens(prompt, response)
+
+        // 更新 log
+        const updateLog = db.prepare(`
+          UPDATE execution_logs
+          SET status = 'success',
+              input_tokens = ?,
+              output_tokens = ?,
+              total_tokens = ?,
+              cost_usd = ?,
+              duration_ms = ?,
+              response = ?
+          WHERE id = ?
+        `)
+        updateLog.run(
+          tokenEstimate.input,
+          tokenEstimate.output,
+          tokenEstimate.total,
+          tokenEstimate.cost,
+          durationMs,
+          response.substring(0, 10000),
+          logId
+        )
+
+        console.log(`[${new Date().toISOString()}] ✅ Quick chat executed successfully`)
+        console.log(`   Tokens: ${tokenEstimate.total} | Cost: $${tokenEstimate.cost.toFixed(6)} | Duration: ${durationMs}ms`)
+
+        jsonResponse(res, {
+          success: true,
+          data: {
+            response: response.substring(0, 10000),
+            tokens: tokenEstimate.total,
+            cost: tokenEstimate.cost,
+            duration: durationMs
+          }
+        })
+      } catch (error) {
+        const durationMs = Date.now() - startTime
+        const errorMessage = error instanceof Error ? error.message : String(error)
+
+        const updateLog = db.prepare(`
+          UPDATE execution_logs
+          SET status = 'failed',
+              duration_ms = ?,
+              error = ?
+          WHERE id = ?
+        `)
+        updateLog.run(durationMs, errorMessage, logId)
+
+        console.error(`[${new Date().toISOString()}] ❌ Quick chat failed: ${errorMessage}`)
+
+        jsonResponse(res, {
+          success: false,
+          error: errorMessage
+        }, 500)
+      }
+      return
+    }
+
+    // POST /api/presets/5hour - 快速設定 5 小時間隔
+    if (path === '/api/presets/5hour' && method === 'POST') {
+      const body = await parseBody(req)
+      const { startHour = 4 } = body as { startHour?: number }
+
+      // 清除現有排程
+      db.prepare('DELETE FROM schedules').run()
+      scheduledTasks.forEach(task => task.stop())
+      scheduledTasks.clear()
+
+      // 建立 5 小時間隔的排程: startHour, +5, +10, +15, +20
+      const hours = [
+        startHour,
+        (startHour + 5) % 24,
+        (startHour + 10) % 24,
+        (startHour + 15) % 24,
+        (startHour + 20) % 24
+      ].sort((a, b) => a - b)
+
+      const insert = db.prepare(`
+        INSERT INTO schedules (name, cron_expression, hour, minute, enabled, prompt)
+        VALUES (?, ?, ?, 0, 1, ?)
+      `)
+
+      const schedules: Schedule[] = []
+      for (const hour of hours) {
+        const name = `Reset @ ${hour.toString().padStart(2, '0')}:00`
+        const cronExpression = `0 ${hour} * * *`
+        const result = insert.run(name, cronExpression, hour, MINIMAL_PROMPT)
+        const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(result.lastInsertRowid) as Schedule
+        schedules.push(schedule)
+        setupSchedule(schedule)
+      }
+
+      jsonResponse(res, { success: true, data: schedules }, 201)
+      return
+    }
+
+    // GET /api/conversations - 取得對話記錄
+    if (path === '/api/conversations' && method === 'GET') {
+      const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 500)
+      const offset = parseInt(url.searchParams.get('offset') || '0')
+      const search = url.searchParams.get('search')
+      const source = url.searchParams.get('source')
+      const category = url.searchParams.get('category')
+      const startDate = url.searchParams.get('startDate')
+      const endDate = url.searchParams.get('endDate')
+
+      let query = 'SELECT * FROM conversations WHERE 1=1'
+      const params: unknown[] = []
+
+      if (search) {
+        query += ` AND (user_prompt LIKE ? OR assistant_response LIKE ?)`
+        const searchTerm = `%${search}%`
+        params.push(searchTerm, searchTerm)
+      }
+      if (source) {
+        query += ` AND source = ?`
+        params.push(source)
+      }
+      if (category && category !== 'uncategorized') {
+        query += ` AND category = ?`
+        params.push(category)
+      }
+      if (startDate) {
+        query += ` AND executed_at >= ?`
+        params.push(startDate)
+      }
+      if (endDate) {
+        query += ` AND executed_at < ?`
+        params.push(`${endDate}T24:00:00`)
+      }
+
+      query += ` ORDER BY executed_at DESC LIMIT ? OFFSET ?`
+      params.push(limit, offset)
+
+      const conversations = db.prepare(query).all(...params)
+
+      const countQuery = query
+        .replace(/ORDER BY.*/, '')
+        .replace(/LIMIT.*/, '')
+        .replace(/SELECT \* FROM conversations/, 'SELECT COUNT(*) as count FROM conversations')
+      const countParams = params.slice(0, -2)
+      const total = (db.prepare(countQuery).get(...countParams) as { count: number }).count
+
+      jsonResponse(res, {
+        success: true,
+        data: {
+          conversations,
+          total,
+          limit,
+          offset
+        }
+      })
+      return
+    }
+
+    // GET /api/conversations/grouped-by-day - 按日期分組
+    if (path === '/api/conversations/grouped-by-day' && method === 'GET') {
+      const search = url.searchParams.get('search')
+      const source = url.searchParams.get('source')
+      const category = url.searchParams.get('category')
+
+      let query = 'SELECT * FROM conversations WHERE 1=1'
+      const params: unknown[] = []
+
+      if (search) {
+        query += ` AND (user_prompt LIKE ? OR assistant_response LIKE ?)`
+        const searchTerm = `%${search}%`
+        params.push(searchTerm, searchTerm)
+      }
+      if (source) {
+        query += ` AND source = ?`
+        params.push(source)
+      }
+      if (category && category !== 'uncategorized') {
+        query += ` AND category = ?`
+        params.push(category)
+      }
+
+      query += ` ORDER BY executed_at DESC`
+      const conversations = db.prepare(query).all(...params) as any[]
+
+      console.log('[GroupedByDay] Query params:', { search, source, category })
+      console.log(`[GroupedByDay] Found ${conversations.length} conversations in database`)
+
+      const groups = groupByDay(conversations)
+      console.log(`[GroupedByDay] Grouped into ${groups.length} day groups`)
+
+      // Log first group details
+      if (groups.length > 0) {
+        const firstConv = groups[0].conversations[0] as any
+        console.log('[GroupedByDay] First group sample:', {
+          date: groups[0].date,
+          label: groups[0].label,
+          conversationCount: groups[0].conversations.length,
+          firstConvUserPrompt: (firstConv?.user_prompt || '').substring(0, 80) + '...'
+        })
+      }
+
+      const total = conversations.length
+
+      jsonResponse(res, {
+        success: true,
+        data: {
+          groups,
+          total
+        }
+      })
+      return
+    }
+
+    // GET /api/conversations/projects/list - 列出所有可用專案
+    if (path === '/api/conversations/projects/list' && method === 'GET') {
+      try {
+        const projectsDir = join(homedir(), '.claude', 'projects')
+
+        if (!existsSync(projectsDir)) {
+          jsonResponse(res, { success: true, data: [] }, 200)
+          return
+        }
+
+        const projects = readdirSync(projectsDir, { withFileTypes: true })
+          .filter(dirent => dirent.isDirectory())
+          .map(dirent => {
+            const projectPath = dirent.name
+            // 解碼專案路徑（去掉開頭的 - 並替換回 /）
+            const decodedPath = projectPath.replace(/^-/, '').replace(/-/g, '/')
+
+            // 從資料庫查詢該專案的對話數量
+            const countResult = db.prepare(
+              'SELECT COUNT(*) as count FROM conversations WHERE project_path = ?'
+            ).get(projectPath) as { count: number } | undefined
+
+            return {
+              projectPath,
+              decodedPath,
+              conversationCount: countResult?.count || 0,
+              displayName: projectPath.split('-').pop() || projectPath // 使用最後一部分作為顯示名稱
+            }
+          })
+          .filter(p => p.conversationCount > 0) // 只返回有對話的專案
+
+        jsonResponse(res, { success: true, data: projects }, 200)
+      } catch (error) {
+        console.error('Failed to list projects:', error)
+        jsonResponse(res, {
+          success: false,
+          error: error instanceof Error ? error.message : 'Unknown error'
+        }, 500)
+      }
+      return
+    }
+
+    // GET /api/conversations/groups - 按日期分組對話（支持專案篩選和排序）
+    if (path === '/api/conversations/groups' && method === 'GET') {
+      try {
+        const search = url.searchParams.get('search')
+        const source = url.searchParams.get('source')
+        const category = url.searchParams.get('category')
+        const projectPath = url.searchParams.get('projectPath')
+        const sortOrder = (url.searchParams.get('sortOrder') || 'desc') as 'asc' | 'desc'
+
+        let query = 'SELECT * FROM conversations WHERE 1=1'
+        const params: unknown[] = []
+
+        if (search) {
+          query += ` AND (user_prompt LIKE ? OR assistant_response LIKE ?)`
+          const searchTerm = `%${search}%`
+          params.push(searchTerm, searchTerm)
+        }
+        if (source) {
+          query += ` AND source = ?`
+          params.push(source)
+        }
+        if (category && category !== 'uncategorized') {
+          query += ` AND category = ?`
+          params.push(category)
+        }
+        // 新增：專案篩選
+        if (projectPath && projectPath !== 'all') {
+          query += ` AND project_path = ?`
+          params.push(projectPath)
+        }
+
+        // 按時間排序
+        query += ` ORDER BY executed_at ${sortOrder === 'asc' ? 'ASC' : 'DESC'}`
+        const conversations = db.prepare(query).all(...params) as any[]
+
+        console.log('[Groups] Query params:', { search, source, category, projectPath, sortOrder })
+        console.log(`[Groups] Found ${conversations.length} conversations in database`)
+
+        // 按日期分組並在每個日期組內按指定順序排序
+        const groups = groupByDayWithSort(conversations, sortOrder)
+        console.log(`[Groups] Grouped into ${groups.length} day groups`)
+
+        jsonResponse(res, {
+          success: true,
+          data: {
+            groups,
+            total: conversations.length
+          }
+        }, 200)
+      } catch (error) {
+        console.error('Failed to fetch groups:', error)
+        jsonResponse(res, {
+          success: false,
+          error: error instanceof Error ? error.message : 'Unknown error'
+        }, 500)
+      }
+      return
+    }
+
+    // GET /api/conversations/debug - 調試: 驗證數據庫中的對話
+    if (path === '/api/conversations/debug' && method === 'GET') {
+      try {
+        // Get database stats
+        const countResult = db.prepare('SELECT COUNT(*) as count FROM conversations').get() as { count: number }
+        const totalCount = countResult.count
+
+        // Get recent conversations
+        const recent = db.prepare(`
+          SELECT id, user_prompt, source, executed_at, created_at
+          FROM conversations
+          ORDER BY created_at DESC
+          LIMIT 10
+        `).all() as any[]
+
+        // Get data by source
+        const bySource = db.prepare(`
+          SELECT source, COUNT(*) as count
+          FROM conversations
+          GROUP BY source
+        `).all() as any[]
+
+        // Get data by category
+        const byCategory = db.prepare(`
+          SELECT category, COUNT(*) as count
+          FROM conversations
+          GROUP BY category
+        `).all() as any[]
+
+        console.log('[Debug] Database verification:', {
+          totalConversations: totalCount,
+          recentCount: recent.length,
+          bySource,
+          byCategory
+        })
+
+        jsonResponse(res, {
+          success: true,
+          data: {
+            totalConversations: totalCount,
+            recentConversations: recent.map(r => ({
+              id: r.id,
+              userPrompt: r.user_prompt?.substring(0, 100) + (r.user_prompt?.length > 100 ? '...' : ''),
+              source: r.source,
+              executedAt: r.executed_at,
+              createdAt: r.created_at
+            })),
+            bySource,
+            byCategory
+          }
+        })
+      } catch (error) {
+        console.error('[Debug] Error:', error)
+        jsonResponse(res, {
+          success: false,
+          error: error instanceof Error ? error.message : 'Debug query failed'
+        }, 500)
+      }
+      return
+    }
+
+    // DELETE /api/conversations/clear - 清除所有對話（用於修復損壞的數據）
+    if (path === '/api/conversations/clear' && method === 'DELETE') {
+      try {
+        const deleted = db.prepare('DELETE FROM conversations').run()
+        console.log('[Clear] Deleted all conversations:', deleted.changes)
+
+        jsonResponse(res, {
+          success: true,
+          data: {
+            deletedCount: deleted.changes
+          }
+        })
+      } catch (error) {
+        console.error('[Clear] Error:', error)
+        jsonResponse(res, {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to clear conversations'
+        }, 500)
+      }
+      return
+    }
+
+    // GET /api/debug/read-history - 測試 readHistory 函數
+    if (path === '/api/debug/read-history' && method === 'GET') {
+      try {
+        const limit = parseInt(url.searchParams.get('limit') || '5')
+        console.log('[Debug] Testing readHistory with limit:', limit)
+
+        const entries = await readHistory(limit)
+        console.log('[Debug] readHistory returned:', entries.length, 'entries')
+
+        jsonResponse(res, {
+          success: true,
+          data: {
+            count: entries.length,
+            entries: entries.map(e => ({
+              display: e.display?.substring(0, 100),
+              timestamp: e.timestamp,
+              sessionId: e.sessionId,
+              project: e.project,
+              hasDisplay: !!e.display,
+              displayLength: e.display?.length
+            }))
+          }
+        })
+      } catch (error) {
+        console.error('[Debug] readHistory error:', error)
+        jsonResponse(res, {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed'
+        }, 500)
+      }
+      return
+    }
+
+    // GET /api/conversations/history-import - 讀取 history.jsonl
+    if (path === '/api/conversations/history-import' && method === 'GET') {
+      const limit = parseInt(url.searchParams.get('limit') || '100')
+      const project = url.searchParams.get('project') || undefined
+
+      try {
+        const entries = await readHistory(limit, project)
+        jsonResponse(res, {
+          success: true,
+          data: {
+            entries,
+            total: entries.length
+          }
+        })
+      } catch (error) {
+        jsonResponse(res, {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to read history'
+        }, 500)
+      }
+      return
+    }
+
+    // POST /api/conversations/merge - 合併 history 和 execution_logs
+    if (path === '/api/conversations/merge' && method === 'POST') {
+      const body = await parseBody(req)
+      const { timeWindowSeconds = 300 } = body as { timeWindowSeconds?: number }
+
+      try {
+        console.log('[Merge] Starting merge process...')
+        const historyEntries = await readHistory(100)
+        console.log('[Merge] ReadHistory result:', {
+          count: historyEntries.length,
+          firstEntry: historyEntries[0] ? {
+            display: historyEntries[0].display?.substring(0, 50),
+            timestamp: historyEntries[0].timestamp,
+            hasDisplay: !!historyEntries[0].display
+          } : 'NONE'
+        })
+
+        const executionLogs = db.prepare('SELECT * FROM execution_logs ORDER BY executed_at DESC LIMIT 100').all() as ExecutionLog[]
+        console.log('[Merge] ExecutionLogs:', {
+          count: executionLogs.length,
+          firstLog: executionLogs[0] ? {
+            id: executionLogs[0].id,
+            response: executionLogs[0].response?.substring(0, 50),
+            executed_at: executionLogs[0].executed_at
+          } : 'NONE'
+        })
+
+        const merged = correlateConversations(historyEntries, executionLogs, timeWindowSeconds)
+        console.log('[Merge] Correlation result:', {
+          total: merged.length,
+          withHistory: merged.filter(m => m.historyEntry).length,
+          withoutHistory: merged.filter(m => !m.historyEntry).length,
+          matched: merged.filter(m => m.matchType !== 'none').length,
+          unmatched: merged.filter(m => m.matchType === 'none').length
+        })
+
+        jsonResponse(res, {
+          success: true,
+          data: {
+            merged,
+            stats: {
+              totalHistory: historyEntries.length,
+              totalLogs: executionLogs.length,
+              matched: merged.filter(m => m.matchType !== 'none').length,
+              unmatched: merged.filter(m => m.matchType === 'none').length
+            }
+          }
+        })
+      } catch (error) {
+        jsonResponse(res, {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to merge'
+        }, 500)
+      }
+      return
+    }
+
+    // GET /api/conversations/check-new - 檢查是否有新對話可以匯入
+    if (path === '/api/conversations/check-new' && method === 'GET') {
+      const params = new URL(req.url!, `http://${req.headers.host}`).searchParams
+      const projectPath = params.get('projectPath')
+
+      try {
+        const projectsDir = join(homedir(), '.claude', 'projects')
+
+        if (!existsSync(projectsDir)) {
+          jsonResponse(res, {
+            success: true,
+            data: {
+              hasNewConversations: false,
+              newFileCount: 0,
+              lastSyncTimestamp: '1970-01-01T00:00:00.000Z'
+            }
+          })
+          return
+        }
+
+        // 取得上次同步時間
+        const syncStatus = db.prepare(
+          'SELECT last_sync_timestamp FROM project_sync_status WHERE project_path = ?'
+        ).get(projectPath || 'all') as { last_sync_timestamp: string } | undefined
+
+        const lastSync = syncStatus?.last_sync_timestamp || '1970-01-01T00:00:00.000Z'
+        const lastSyncDate = new Date(lastSync)
+
+        // 掃描檔案修改時間
+        let newFileCount = 0
+        const projects = projectPath ? [projectPath] : readdirSync(projectsDir).filter(f => {
+          const fullPath = join(projectsDir, f)
+          try {
+            return statSync(fullPath).isDirectory()
+          } catch {
+            return false
+          }
+        })
+
+        for (const proj of projects) {
+          const projDir = join(projectsDir, proj)
+          try {
+            const files = readdirSync(projDir).filter(f => f.endsWith('.jsonl'))
+
+            for (const file of files) {
+              try {
+                const filePath = join(projDir, file)
+                const stat = statSync(filePath)
+                if (stat.mtime > lastSyncDate) {
+                  newFileCount++
+                }
+              } catch (e) {
+                // Skip files that can't be accessed
+                continue
+              }
+            }
+          } catch (e) {
+            // Skip projects that can't be read
+            continue
+          }
+        }
+
+        jsonResponse(res, {
+          success: true,
+          data: {
+            hasNewConversations: newFileCount > 0,
+            newFileCount,
+            lastSyncTimestamp: lastSync
+          }
+        })
+      } catch (e) {
+        jsonResponse(res, {
+          success: false,
+          error: e instanceof Error ? e.message : 'Failed to check for new conversations'
+        }, 500)
+      }
+      return
+    }
+
+    // POST /api/conversations/import-from-projects - 從 Projects JSONL 匯入完整對話
+    if (path === '/api/conversations/import-from-projects' && method === 'POST') {
+      const body = await parseBody(req)
+      const { projectPath, limit, incrementalOnly } = body as { projectPath?: string; limit?: number; incrementalOnly?: boolean }
+
+      try {
+        console.log('[ImportProjects] Starting import process...', { projectPath, limit })
+        const projectsDir = join(homedir(), '.claude', 'projects')
+
+        // 檢查 projects 目錄是否存在
+        if (!existsSync(projectsDir)) {
+          jsonResponse(res, {
+            success: false,
+            error: 'Projects directory not found: ' + projectsDir
+          }, 404)
+          return
+        }
+
+        // 確定要處理的 projects
+        let projects: string[] = []
+        if (projectPath) {
+          projects = [projectPath]
+        } else {
+          // 掃描所有 project 目錄
+          projects = readdirSync(projectsDir).filter(f => {
+            const fullPath = join(projectsDir, f)
+            try {
+              const stat = statSync(fullPath)
+              return stat.isDirectory()
+            } catch {
+              return false
+            }
+          })
+        }
+
+        console.log('[ImportProjects] Found projects:', projects.length)
+
+        // 取得上次同步時間（如果是增量模式）
+        let lastSync = '1970-01-01T00:00:00.000Z'
+        if (incrementalOnly) {
+          const syncStatus = db.prepare(
+            'SELECT last_sync_timestamp FROM project_sync_status WHERE project_path = ?'
+          ).get(projectPath || 'all') as { last_sync_timestamp: string } | undefined
+
+          lastSync = syncStatus?.last_sync_timestamp || '1970-01-01T00:00:00.000Z'
+          console.log(`[ImportProjects] Incremental mode enabled, lastSync: ${lastSync}`)
+        }
+
+        const lastSyncDate = new Date(lastSync)
+
+        const allConversations: Array<{
+          sessionId: string | null
+          projectPath: string | undefined
+          userPrompt: string
+          assistantResponse: string | null
+          executedAt: string
+          inputTokens: number
+          outputTokens: number
+          totalTokens: number
+          costUsd: number
+          source: string
+          category: string
+        }> = []
+
+        // 處理每個 project
+        for (const project of projects) {
+          const projectDir = join(projectsDir, project)
+
+          try {
+            // 讀取檔案並按修改時間排序（最新優先）
+            const sessionFiles = readdirSync(projectDir)
+              .filter(f => f.endsWith('.jsonl'))
+              .map(f => ({
+                name: f,
+                mtime: statSync(join(projectDir, f)).mtime
+              }))
+              .sort((a, b) => b.mtime.getTime() - a.mtime.getTime()) // 降序排序（最新優先）
+              .filter(f => incrementalOnly ? f.mtime > lastSyncDate : true) // 增量模式：只處理新檔案
+              .slice(0, limit || 100) // 限制檔案數量
+              .map(f => f.name)
+
+            console.log(`[ImportProjects] Processing project "${project}": ${sessionFiles.length} session files (incremental: ${incrementalOnly})`)
+
+            for (const sessionFile of sessionFiles) {
+              const sessionId = sessionFile.replace('.jsonl', '')
+
+              try {
+                const { userMessages, assistantMessages } = readProjectsJSONL(project, sessionId)
+                let conversations = pairConversations(userMessages, assistantMessages, project)
+
+                // 增量模式：過濾掉舊於上次同步時間的對話
+                if (incrementalOnly) {
+                  conversations = conversations.filter(conv => {
+                    return new Date(conv.executedAt) > lastSyncDate
+                  })
+                }
+
+                allConversations.push(...conversations)
+              } catch (e) {
+                console.error(`[ImportProjects] Failed to process session ${sessionId}:`, e)
+              }
+            }
+          } catch (e) {
+            console.error(`[ImportProjects] Failed to process project ${project}:`, e)
+          }
+        }
+
+        console.log(`[ImportProjects] Parsed ${allConversations.length} total conversations`)
+
+        // DEBUG: Log first conversation to verify data
+        if (allConversations.length > 0) {
+          console.log('[ImportProjects] First conversation sample:', {
+            userPrompt: allConversations[0].userPrompt?.substring(0, 100),
+            assistantResponse: allConversations[0].assistantResponse?.substring(0, 100),
+            inputTokens: allConversations[0].inputTokens,
+            outputTokens: allConversations[0].outputTokens
+          })
+        }
+
+        // 儲存到資料庫（with duplicate detection）
+        const insert = db.prepare(`
+          INSERT OR IGNORE INTO conversations (
+            session_id, project_path, user_prompt, assistant_response, executed_at, prompt_hash,
+            category, source, input_tokens, output_tokens, total_tokens, cost_usd
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+
+        let inserted = 0
+        let duplicates = 0
+        let failed = 0
+
+        for (const conv of allConversations) {
+          try {
+            const hash = generatePromptHash(conv.userPrompt)
+            const info = insert.run(
+              conv.sessionId,
+              conv.projectPath,
+              conv.userPrompt,
+              conv.assistantResponse,
+              conv.executedAt,
+              hash,
+              conv.category,
+              conv.source,
+              conv.inputTokens,
+              conv.outputTokens,
+              conv.totalTokens,
+              conv.costUsd
+            )
+
+            if (info.changes > 0) {
+              inserted++
+            } else {
+              duplicates++
+            }
+          } catch (e) {
+            console.error('[ImportProjects] Failed to insert:', e)
+            failed++
+          }
+        }
+
+        console.log(`[ImportProjects] Completed: Inserted ${inserted}, Duplicates ${duplicates}, Failed ${failed}`)
+
+        // Update sync status after successful import
+        if (inserted > 0 || duplicates > 0) {
+          try {
+            const upsertSync = db.prepare(`
+              INSERT INTO project_sync_status (
+                project_path,
+                last_sync_timestamp,
+                total_conversations_synced,
+                last_sync_status,
+                created_at,
+                updated_at
+              ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+              ON CONFLICT(project_path) DO UPDATE SET
+                last_sync_timestamp = excluded.last_sync_timestamp,
+                total_conversations_synced = total_conversations_synced + excluded.total_conversations_synced,
+                last_sync_status = excluded.last_sync_status,
+                updated_at = CURRENT_TIMESTAMP
+            `)
+
+            const syncProjectPath = projectPath || 'all'
+            const syncTimestamp = new Date().toISOString()
+
+            upsertSync.run(
+              syncProjectPath,
+              syncTimestamp,
+              inserted,
+              'success'
+            )
+
+            console.log(`[ImportProjects] Updated sync status for ${syncProjectPath}: timestamp=${syncTimestamp}, synced=${inserted}`)
+          } catch (syncError) {
+            console.error('[ImportProjects] Failed to update sync status:', syncError)
+            // Don't fail the whole import if sync status update fails
+          }
+        }
+
+        jsonResponse(res, {
+          success: true,
+          data: {
+            inserted,
+            duplicates,
+            failed,
+            total: allConversations.length
+          }
+        }, 201)
+      } catch (error) {
+        console.error('[ImportProjects] Error:', error)
+        jsonResponse(res, {
+          success: false,
+          error: error instanceof Error ? error.message : 'Import failed'
+        }, 500)
+      }
+      return
+    }
+
+    // POST /api/conversations - 保存對話
+    if (path === '/api/conversations' && method === 'POST') {
+      const body = await parseBody(req)
+      const { conversations: conversationsToSave } = body as { conversations: Array<Record<string, unknown>> }
+
+      if (!Array.isArray(conversationsToSave)) {
+        jsonResponse(res, { success: false, error: 'Invalid conversations array' }, 400)
+        return
+      }
+
+      console.log(`[SaveConversations] Attempting to save ${conversationsToSave.length} conversations`)
+
+      try {
+        const insert = db.prepare(`
+          INSERT INTO conversations (
+            execution_log_id, session_id, project_path, user_prompt, assistant_response,
+            category, tags, source, executed_at, input_tokens, output_tokens, total_tokens,
+            cost_usd, duration_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+
+        const ids: number[] = []
+        let inserted = 0
+        let failed = 0
+
+        for (const conv of conversationsToSave) {
+          try {
+            // Handle both camelCase and snake_case property names
+            const c = conv as Record<string, any>
+            const executionLogId = c.execution_log_id || c.executionLogId || null
+            const sessionId = c.session_id || c.sessionId || null
+            const projectPath = c.project_path || c.projectPath || null
+            const userPrompt = ((c.user_prompt || c.userPrompt || '') as string).trim() || '[Empty prompt]'
+            const assistantResponse = c.assistant_response || c.assistantResponse || null
+            const category = c.category || 'uncategorized'
+            const tags = c.tags ? JSON.stringify(c.tags) : null
+            const source = c.source || 'manual'
+            const executedAt = c.executed_at || c.executedAt
+            const inputTokens = c.input_tokens || c.inputTokens || 0
+            const outputTokens = c.output_tokens || c.outputTokens || 0
+            const totalTokens = c.total_tokens || c.totalTokens || 0
+            const costUsd = c.cost_usd || c.costUsd || 0
+            const durationMs = c.duration_ms || c.durationMs || 0
+
+            // VALIDATION: Warn if userPrompt looks like a Claude response (data corruption detection)
+            if (
+              userPrompt.startsWith('Hi! I\'m Claude') ||
+              userPrompt.includes('I\'m here to help') ||
+              userPrompt.includes('I\'m Claude')
+            ) {
+              console.warn(
+                '[SaveConversations] SUSPICIOUS: userPrompt looks like Claude response instead of user prompt:',
+                userPrompt.substring(0, 200)
+              )
+            }
+
+            // Log first conversation sample to verify data transformation
+            if (inserted === 0 && failed === 0) {
+              console.log('[SaveConversations] First conversation sample:', {
+                userPrompt: userPrompt.substring(0, 80) + (userPrompt.length > 80 ? '...' : ''),
+                source,
+                executedAt,
+                hasUserPrompt: !!userPrompt,
+                userPromptLength: userPrompt.length,
+                sessionId,
+                category
+              })
+            }
+
+            const result = insert.run(
+              executionLogId,
+              sessionId,
+              projectPath,
+              userPrompt,
+              assistantResponse,
+              category,
+              tags,
+              source,
+              executedAt,
+              inputTokens,
+              outputTokens,
+              totalTokens,
+              costUsd,
+              durationMs
+            )
+            ids.push(result.lastInsertRowid as number)
+            inserted++
+          } catch (e) {
+            console.error('[SaveConversations] Failed to insert conversation:', e, 'Conversation:', JSON.stringify(conv).substring(0, 200))
+            failed++
+          }
+        }
+
+        console.log(`[SaveConversations] Completed: Inserted: ${inserted}, Failed: ${failed}`)
+
+        jsonResponse(res, {
+          success: true,
+          data: {
+            inserted,
+            failed,
+            ids
+          }
+        }, 201)
+      } catch (error) {
+        jsonResponse(res, {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to save conversations'
+        }, 500)
+      }
+      return
+    }
+
+    // PUT /api/conversations/:id - 更新對話
+    if (path.match(/^\/api\/conversations\/\d+$/) && method === 'PUT') {
+      const id = parseInt(path.split('/')[3])
+      const body = await parseBody(req)
+      const { category, tags } = body as { category?: string; tags?: string[] }
+
+      try {
+        const update = db.prepare(`
+          UPDATE conversations
+          SET category = ?, tags = ?, categorized_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `)
+        update.run(
+          category || 'uncategorized',
+          tags ? JSON.stringify(tags) : null,
+          id
+        )
+
+        jsonResponse(res, { success: true, data: { id } })
+      } catch (error) {
+        jsonResponse(res, {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to update conversation'
+        }, 500)
+      }
+      return
+    }
+
+    // DELETE /api/conversations/:id - 刪除對話
+    if (path.match(/^\/api\/conversations\/\d+$/) && method === 'DELETE') {
+      const id = parseInt(path.split('/')[3])
+
+      try {
+        const del = db.prepare('DELETE FROM conversations WHERE id = ?')
+        del.run(id)
+
+        jsonResponse(res, { success: true, data: { id } })
+      } catch (error) {
+        jsonResponse(res, {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to delete conversation'
+        }, 500)
+      }
+      return
+    }
+
+    // GET /api/config/history-paths - 獲取所有對話歷史路徑配置
+    if (path === '/api/config/history-paths' && method === 'GET') {
+      try {
+        const defaultPath = join(homedir(), '.claude', 'history.jsonl')
+        const pathsRow = db.prepare('SELECT value FROM config WHERE key = ?').get('history_paths') as { value: string } | undefined
+        const indexRow = db.prepare('SELECT value FROM config WHERE key = ?').get('current_history_path_index') as { value: string } | undefined
+
+        let paths: string[] = []
+        let currentIndex = 0
+
+        if (pathsRow?.value) {
+          try {
+            paths = JSON.parse(pathsRow.value)
+          } catch (e) {
+            console.error('Failed to parse paths config:', e)
+            paths = []
+          }
+        }
+
+        if (indexRow?.value) {
+          currentIndex = parseInt(indexRow.value, 10)
+        }
+
+        // Ensure currentIndex is valid
+        if (currentIndex >= paths.length) {
+          currentIndex = 0
+        }
+
+        jsonResponse(res, {
+          success: true,
+          data: {
+            paths: paths.length > 0 ? paths : [defaultPath],
+            currentIndex,
+            isConfigured: paths.length > 0
+          }
+        })
+      } catch (error) {
+        jsonResponse(res, {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to get history paths configuration'
+        }, 500)
+      }
+      return
+    }
+
+    // POST /api/config/history-paths - 添加新對話歷史路徑
+    if (path === '/api/config/history-paths' && method === 'POST') {
+      try {
+        const body = await parseBody(req)
+        const { path: newPath } = body as { path: string }
+
+        if (!newPath || typeof newPath !== 'string' || newPath.trim() === '') {
+          jsonResponse(res, { success: false, error: 'Invalid path provided' }, 400)
+          return
+        }
+
+        // Validate the path exists
+        if (!existsSync(newPath)) {
+          jsonResponse(res, { success: false, error: `Path does not exist: ${newPath}` }, 400)
+          return
+        }
+
+        // Get existing paths
+        let paths: string[] = []
+        const pathsRow = db.prepare('SELECT value FROM config WHERE key = ?').get('history_paths') as { value: string } | undefined
+        if (pathsRow?.value) {
+          try {
+            paths = JSON.parse(pathsRow.value)
+          } catch (e) {
+            console.error('Failed to parse paths config:', e)
+          }
+        }
+
+        // Add new path if not already exists
+        if (!paths.includes(newPath)) {
+          paths.push(newPath)
+        }
+
+        // Save updated paths
+        const upsert = db.prepare(`
+          INSERT INTO config (key, value) VALUES (?, ?)
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        `)
+        upsert.run('history_paths', JSON.stringify(paths))
+
+        jsonResponse(res, {
+          success: true,
+          data: {
+            paths,
+            message: 'History path added successfully'
+          }
+        }, 201)
+      } catch (error) {
+        jsonResponse(res, {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to add history path'
+        }, 500)
+      }
+      return
+    }
+
+    // DELETE /api/config/history-paths/:index - 刪除對話歷史路徑
+    if (path.match(/^\/api\/config\/history-paths\/\d+$/) && method === 'DELETE') {
+      try {
+        const index = parseInt(path.split('/')[4], 10)
+
+        // Get existing paths
+        let paths: string[] = []
+        const pathsRow = db.prepare('SELECT value FROM config WHERE key = ?').get('history_paths') as { value: string } | undefined
+        if (pathsRow?.value) {
+          try {
+            paths = JSON.parse(pathsRow.value)
+          } catch (e) {
+            console.error('Failed to parse paths config:', e)
+          }
+        }
+
+        if (index < 0 || index >= paths.length) {
+          jsonResponse(res, { success: false, error: 'Invalid path index' }, 400)
+          return
+        }
+
+        // Remove path at index
+        paths.splice(index, 1)
+
+        // Save updated paths
+        const upsert = db.prepare(`
+          INSERT INTO config (key, value) VALUES (?, ?)
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        `)
+        upsert.run('history_paths', JSON.stringify(paths))
+
+        // Update current index if necessary
+        let currentIndex = 0
+        const indexRow = db.prepare('SELECT value FROM config WHERE key = ?').get('current_history_path_index') as { value: string } | undefined
+        if (indexRow?.value) {
+          currentIndex = parseInt(indexRow.value, 10)
+        }
+        if (currentIndex >= paths.length && paths.length > 0) {
+          currentIndex = paths.length - 1
+        }
+        db.prepare(`
+          INSERT INTO config (key, value) VALUES (?, ?)
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        `).run('current_history_path_index', currentIndex.toString())
+
+        jsonResponse(res, {
+          success: true,
+          data: {
+            paths,
+            currentIndex,
+            message: 'History path deleted successfully'
+          }
+        })
+      } catch (error) {
+        jsonResponse(res, {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to delete history path'
+        }, 500)
+      }
+      return
+    }
+
+    // PUT /api/config/history-paths/:index/select - 選擇對話歷史路徑
+    if (path.match(/^\/api\/config\/history-paths\/\d+\/select$/) && method === 'PUT') {
+      try {
+        const index = parseInt(path.split('/')[4], 10)
+
+        // Get existing paths
+        let paths: string[] = []
+        const pathsRow = db.prepare('SELECT value FROM config WHERE key = ?').get('history_paths') as { value: string } | undefined
+        if (pathsRow?.value) {
+          try {
+            paths = JSON.parse(pathsRow.value)
+          } catch (e) {
+            console.error('Failed to parse paths config:', e)
+          }
+        }
+
+        if (index < 0 || index >= paths.length) {
+          jsonResponse(res, { success: false, error: 'Invalid path index' }, 400)
+          return
+        }
+
+        // Save current index
+        const upsert = db.prepare(`
+          INSERT INTO config (key, value) VALUES (?, ?)
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        `)
+        upsert.run('current_history_path_index', index.toString())
+
+        jsonResponse(res, {
+          success: true,
+          data: {
+            currentIndex: index,
+            path: paths[index],
+            message: 'History path selected successfully'
+          }
+        })
+      } catch (error) {
+        jsonResponse(res, {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to select history path'
+        }, 500)
+      }
+      return
+    }
+
+    // 404
+    jsonResponse(res, { success: false, error: 'Not found' }, 404)
+
+  } catch (error) {
+    console.error('API Error:', error)
+    jsonResponse(res, { 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Internal server error' 
+    }, 500)
+  }
+}
+
+// ============ Start Server ============
+const PORT = process.env.PORT || 3001
+
+const server = createServer(handleRequest)
+
+server.listen(PORT, () => {
+  console.log(`
+╔════════════════════════════════════════════════════════════╗
+║         Claude Code Scheduler Server v1.0.0                ║
+╠════════════════════════════════════════════════════════════╣
+║  🌐 Server running at http://localhost:${PORT}               ║
+║  📁 Database: ${dbPath}
+║  🕐 Timezone: Asia/Taipei                                  ║
+╚════════════════════════════════════════════════════════════╝
+  `)
+  
+  initializeSchedules()
+})
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+  console.log('\n🛑 Shutting down...')
+  scheduledTasks.forEach(task => task.stop())
+  db.close()
+  server.close()
+  process.exit(0)
+})
