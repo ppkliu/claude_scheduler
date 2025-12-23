@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+dist/
+.vite/
+
+# Environment
+.env
+.env.local
+.env.production
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+dev.log
+
+# Build
+dist/
+.cache/
+
+# Database
+scheduler.db
+scheduler.db-*
+
+# Backup
+bak/
