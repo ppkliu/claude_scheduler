@@ -1,0 +1,1 @@
+npx concurrently "tsx watch server/index.ts" "vite"
