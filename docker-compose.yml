@@ -1,0 +1,74 @@
+version: '3.9'
+
+services:
+  # Development service
+  app-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: claude-scheduler-dev
+    ports:
+      - "5173:5173"  # Vite dev server
+      - "3000:3000"  # API server
+    volumes:
+      # Mount source code for live reload
+      - .:/app
+      # Named volume for node_modules to avoid conflicts
+      - /app/node_modules
+      # Volume for database persistence (optional)
+      - ./scheduler.db:/app/scheduler.db
+    environment:
+      # Development environment
+      NODE_ENV: development
+      VITE_API_URL: http://localhost:3000
+
+      # API Configuration
+      API_PORT: 3000
+      API_HOST: 0.0.0.0
+
+      # Claude Configuration (if needed)
+      # CLAUDE_API_KEY: your-api-key-here
+
+      # Database
+      DB_PATH: /app/scheduler.db
+
+      # Logging
+      LOG_LEVEL: debug
+
+    # Override the default command for development
+    command: npm run dev
+
+    # Container restart policy
+    restart: unless-stopped
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:5173', (r) => {if (r.statusCode !== 404) throw new Error(r.statusCode)})"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+    # Interactive terminal
+    stdin_open: true
+    tty: true
+
+    # Network
+    networks:
+      - claude-network
+
+  # Optional: Database service (if using external DB)
+  # db:
+  #   image: sqlite
+  #   volumes:
+  #     - ./data:/data
+  #   networks:
+  #     - claude-network
+
+networks:
+  claude-network:
+    driver: bridge
+
+volumes:
+  node_modules:
