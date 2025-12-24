@@ -7,7 +7,7 @@ services:
       context: .
       dockerfile: Dockerfile
       target: production
-    container_name: claude-scheduler
+    container_name: llm-scheduler
     ports:
       - "3000:3000"  # API server
       # Optional: If serving static files from nginx
@@ -28,8 +28,8 @@ services:
       API_PORT: 3000
       API_HOST: 0.0.0.0
 
-      # Claude API Configuration
-      # CLAUDE_API_KEY: ${CLAUDE_API_KEY}
+      # LLM API Configuration
+      # LLM_API_KEY: ${LLM_API_KEY}
 
       # Database
       DB_PATH: /app/data/scheduler.db
@@ -67,11 +67,11 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-        labels: "service=claude-scheduler"
+        labels: "service=llm-scheduler"
 
     # Network
     networks:
-      - claude-network
+      - llm-network
 
     # Security context
     user: "nodejs"
@@ -84,7 +84,7 @@ services:
   # Optional: Nginx reverse proxy for production
   # nginx:
   #   image: nginx:alpine
-  #   container_name: claude-scheduler-nginx
+  #   container_name: llm-scheduler-nginx
   #   ports:
   #     - "80:80"
   #     - "443:443"
@@ -94,11 +94,11 @@ services:
   #   depends_on:
   #     - app
   #   networks:
-  #     - claude-network
+  #     - llm-network
   #   restart: unless-stopped
 
 networks:
-  claude-network:
+  llm-network:
     driver: bridge
 
 volumes:

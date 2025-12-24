@@ -6,7 +6,7 @@ import './style.css'
 
 // Initialize theme before mounting to avoid flash
 function initTheme() {
-  const STORAGE_KEY = 'claude-scheduler-theme'
+  const STORAGE_KEY = 'llm-scheduler-theme'
   const stored = localStorage.getItem(STORAGE_KEY) || 'system'
   const root = document.documentElement
 

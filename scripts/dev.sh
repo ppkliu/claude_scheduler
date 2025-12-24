@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Claude Scheduler - Development Environment Startup Script
+# LLM Scheduler - Development Environment Startup Script
 # This script starts the development environment using Docker Compose
 
 set -e
@@ -15,7 +15,7 @@ NC='\033[0m' # No Color
 # Configuration
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_FILE="${PROJECT_DIR}/docker-compose.yml"
-CONTAINER_NAME="claude-scheduler-dev"
+CONTAINER_NAME="llm-scheduler-dev"
 
 # Functions
 print_header() {

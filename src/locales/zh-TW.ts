@@ -1,8 +1,8 @@
 export default {
   app: {
-    title: 'Claude Code Scheduler',
+    title: 'LLM Code Scheduler',
     subtitle: '5 小時限制重置管理器',
-    conversationsTitle: 'Claude 對話記錄',
+    conversationsTitle: 'LLM 對話記錄',
     conversationsSubtitle: '對話歷史與分類管理'
   },
   nav: {
@@ -37,7 +37,7 @@ export default {
   },
   quickSetup: {
     title: '快速設定 5 小時間隔',
-    description: '自動建立 5 個排程，每 5 小時重置一次 Claude Code 限制，確保你在工作時間內有充足額度。',
+    description: '自動建立 5 個排程，每 5 小時重置一次 LLM Code 限制，確保你在工作時間內有充足額度。',
     startTime: '起始時間',
     apply: '套用',
     applying: '設定中...',
@@ -45,12 +45,12 @@ export default {
   },
   quickChat: {
     title: '快速對話',
-    description: '輸入 prompt 立即與 Claude 對話',
+    description: '輸入 prompt 立即與 LLM 對話',
     placeholder: '輸入您的 prompt...',
     execute: '執行對話',
     executing: '執行中...',
     clear: '清除',
-    response: 'Claude 的回應：',
+    response: 'LLM 的回應：',
     tokens: 'Tokens',
     cost: '成本',
     duration: '耗時',
@@ -117,12 +117,13 @@ export default {
     sortNewestFirst: '最新優先',
     date: '日期',
     userPrompt: '使用者提示',
-    assistantResponse: 'Claude 回應',
+    assistantResponse: 'LLM 回應',
     expand: '展開',
     collapse: '收起',
     uncategorized: '未分類',
     listView: '列表視圖',
-    analysisView: '分析視圖'
+    analysisView: '分析視圖',
+    projectView: '專案視圖'
   },
   settings: {
     title: '設定',

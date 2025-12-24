@@ -7,6 +7,7 @@ import { formatDateTime, formatCost, formatTokens } from '@/lib/utils'
 import { useDebounceFn } from '@vueuse/core'
 import MarkdownRenderer from './MarkdownRenderer.vue'
 import ConversationAnalysisView from './ConversationAnalysisView.vue'
+import ConversationProjectView from './ConversationProjectView.vue'
 
 const { t } = useI18n()
 const store = useSchedulerStore()
@@ -20,7 +21,8 @@ const isImporting = ref(false)
 const showAddPathInput = ref(false)
 const newPathInput = ref('')
 const addingPath = ref(false)
-const viewMode = ref<'list' | 'analysis'>('list')
+const viewMode = ref<'list' | 'analysis' | 'project'>('list')
+const expandedProjects = ref<Set<string>>(new Set())
 const isRefreshing = ref(false)
 
 // Auto-detection state for new conversations
@@ -49,6 +51,14 @@ function showNotification(message: string, type: 'success' | 'error' | 'warning'
 
 function dismissToast() {
   showToast.value = false
+}
+
+function toggleProjectExpand(projectPath: string) {
+  if (expandedProjects.value.has(projectPath)) {
+    expandedProjects.value.delete(projectPath)
+  } else {
+    expandedProjects.value.add(projectPath)
+  }
 }
 
 const MESSAGE_COLLAPSE_THRESHOLD = 100
@@ -776,6 +786,17 @@ async function handleRemovePath(index: number) {
         >
           {{ t('conversations.analysisView') || '分析視圖' }}
         </button>
+        <button
+          @click="viewMode = 'project'"
+          :class="[
+            'px-4 py-2 rounded-lg text-sm font-medium transition-colors',
+            viewMode === 'project'
+              ? 'bg-primary text-primary-foreground'
+              : 'bg-background border border-border hover:bg-secondary/50'
+          ]"
+        >
+          {{ t('conversations.projectView') || '專案視圖' }}
+        </button>
       </div>
     </div>
 
@@ -921,6 +942,14 @@ async function handleRemovePath(index: number) {
       <ConversationAnalysisView
         v-else-if="viewMode === 'analysis'"
         :conversations="allConversations"
+      />
+
+      <!-- Project View -->
+      <ConversationProjectView
+        v-else-if="viewMode === 'project'"
+        :conversations="allConversations"
+        :expanded-projects="expandedProjects"
+        @toggle-expand="toggleProjectExpand"
       />
 
       <!-- Empty State -->

@@ -7,10 +7,10 @@
 
 ## 📋 Overview
 
-Claude Scheduler is a dual-purpose application for managing Claude Code CLI execution and conversation history:
+Claude Scheduler is a dual-purpose application for managing LLM Code CLI execution and conversation history:
 
-1. **Schedule Manager**: Automates Claude Code CLI execution on cron schedules to manage the 5-hour usage limit reset
-2. **Conversation Manager**: Imports, categorizes, and tracks Claude Code conversation history with complete Q&A pairs
+1. **Schedule Manager**: Automates LLM Code CLI execution on cron schedules to manage the 5-hour usage limit reset
+2. **Conversation Manager**: Imports, categorizes, and tracks LLM Code conversation history with complete Q&A pairs
 
 ---
 
@@ -85,7 +85,7 @@ claude-scheduler/
 │   └── .env.production.example   (Prod configuration template)
 │
 ├── 📄 Documentation
-│   ├── CLAUDE.md                 (Claude Code guidance)
+│   ├── CLAUDE.md                 (LLM Code guidance)
 │   ├── DOCKER.md                 (Complete Docker guide)
 │   ├── DOCKER_QUICK_START.md     (Quick reference)
 │   ├── DOCKER_SETUP_SUMMARY.md   (Setup verification)
@@ -270,7 +270,7 @@ npm run build
 - **DOCKER_SETUP_SUMMARY.md** - Installation verification checklist
 
 ### For Future Development
-- **CLAUDE.md** - Guidance for Claude Code with current architecture and features
+- **CLAUDE.md** - Guidance for LLM Code with current architecture and features
 - **README.md** - Project overview and original setup
 
 ---

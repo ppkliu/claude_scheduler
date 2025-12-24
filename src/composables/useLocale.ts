@@ -2,7 +2,7 @@ import { useI18n } from 'vue-i18n'
 
 export type Locale = 'en' | 'zh-TW' | 'zh-CN'
 
-const STORAGE_KEY = 'claude-scheduler-locale'
+const STORAGE_KEY = 'llm-scheduler-locale'
 
 export function useLocale() {
   const { locale } = useI18n()
