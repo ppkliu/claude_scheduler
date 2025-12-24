@@ -474,7 +474,7 @@ vi .env.production
 **Location**: `/CLAUDE.md`
 **Size**: 10 KB
 **Lines**: 285
-**Type**: Architecture guide for Claude Code instances
+**Type**: Architecture guide for LLM Code instances
 
 **Updates in v1.2**:
 - Added Docker Development subsection (3 methods)
@@ -494,7 +494,7 @@ vi .env.production
 - Rendering markdown & code highlighting
 - Docker deployment
 
-**Best For**: Future Claude Code instances, developers new to project
+**Best For**: Future LLM Code instances, developers new to project
 
 ---
 

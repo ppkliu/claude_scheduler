@@ -1,8 +1,8 @@
 export default {
   app: {
-    title: 'Claude Code Scheduler',
+    title: 'LLM Code Scheduler',
     subtitle: '5-Hour Limit Reset Manager',
-    conversationsTitle: 'Claude Conversations',
+    conversationsTitle: 'LLM Conversations',
     conversationsSubtitle: 'Conversation History & Management'
   },
   nav: {
@@ -37,7 +37,7 @@ export default {
   },
   quickSetup: {
     title: 'Quick Setup 5-Hour Interval',
-    description: 'Automatically create 5 schedules, resetting Claude Code limit every 5 hours to ensure sufficient quota during working hours.',
+    description: 'Automatically create 5 schedules, resetting LLM Code limit every 5 hours to ensure sufficient quota during working hours.',
     startTime: 'Start Time',
     apply: 'Apply',
     applying: 'Applying...',
@@ -45,12 +45,12 @@ export default {
   },
   quickChat: {
     title: 'Quick Chat',
-    description: 'Enter prompt to chat with Claude immediately',
+    description: 'Enter prompt to chat with LLM immediately',
     placeholder: 'Enter your prompt...',
     execute: 'Execute Chat',
     executing: 'Executing...',
     clear: 'Clear',
-    response: 'Claude Response:',
+    response: 'LLM Response:',
     tokens: 'Tokens',
     cost: 'Cost',
     duration: 'Duration',
@@ -117,12 +117,13 @@ export default {
     sortNewestFirst: 'Newest First',
     date: 'Date',
     userPrompt: 'User Prompt',
-    assistantResponse: 'Claude Response',
+    assistantResponse: 'LLM Response',
     expand: 'Expand',
     collapse: 'Collapse',
     uncategorized: 'Uncategorized',
     listView: 'List View',
-    analysisView: 'Analysis View'
+    analysisView: 'Analysis View',
+    projectView: 'Project View'
   },
   settings: {
     title: 'Settings',

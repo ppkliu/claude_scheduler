@@ -56,7 +56,7 @@ npm run server      # Terminal 2: Backend (http://localhost:3001)
 - Troubleshooting
 - Advanced configuration
 
-### 🤖 I'm a Claude Code instance setting up here
+### 🤖 I'm a LLM Code instance setting up here
 → Read: **CLAUDE.md** (Architecture guide)
 - Project structure
 - Development commands
@@ -190,10 +190,10 @@ See **DOCKER.md** - "Troubleshooting" section for detailed solutions.
 **Claude Scheduler** has two main purposes:
 
 ### 1. Schedule Manager
-Automates Claude Code CLI execution on a cron schedule to manage the 5-hour usage limit reset.
+Automates LLM Code CLI execution on a cron schedule to manage the 5-hour usage limit reset.
 
 ### 2. Conversation Manager
-Imports, organizes, and analyzes your Claude Code conversation history:
+Imports, organizes, and analyzes your LLM Code conversation history:
 - Full conversation transcripts
 - Search and filtering
 - Category and source management
@@ -265,7 +265,7 @@ API:      http://localhost:3000
 
 ### ✅ Implemented
 
-- ✅ Conversation import from Claude Code CLI
+- ✅ Conversation import from LLM Code CLI
 - ✅ Full conversation search and filtering
 - ✅ Category and source management
 - ✅ Schedule management UI

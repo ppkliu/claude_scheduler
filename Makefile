@@ -15,7 +15,7 @@ GREEN := \033[0;32m
 NC := \033[0m # No Color
 
 help: ## Show this help message
-	@echo "$(BLUE)Claude Scheduler - Docker Commands$(NC)"
+	@echo "$(BLUE)LLM Scheduler - Docker Commands$(NC)"
 	@echo "======================================"
 	@echo ""
 	@echo "$(GREEN)Development Commands:$(NC)"

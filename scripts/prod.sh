@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Claude Scheduler - Production Environment Deployment Script
+# LLM Scheduler - Production Environment Deployment Script
 # This script manages the production environment using Docker Compose
 
 set -e
@@ -15,7 +15,7 @@ NC='\033[0m' # No Color
 # Configuration
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_FILE="${PROJECT_DIR}/docker-compose.prod.yml"
-CONTAINER_NAME="claude-scheduler"
+CONTAINER_NAME="llm-scheduler"
 ENV_FILE="${PROJECT_DIR}/.env.production"
 
 # Functions
@@ -65,8 +65,8 @@ API_HOST=0.0.0.0
 LOG_LEVEL=info
 DB_PATH=/app/data/scheduler.db
 
-# Claude API Configuration
-# CLAUDE_API_KEY=your-api-key-here
+# LLM API Configuration
+# LLM_API_KEY=your-api-key-here
 
 # Security
 # ALLOWED_ORIGINS=https://yourdomain.com

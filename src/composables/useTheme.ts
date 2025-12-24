@@ -2,7 +2,7 @@ import { ref, onMounted } from 'vue'
 
 export type Theme = 'light' | 'dark' | 'system'
 
-const STORAGE_KEY = 'claude-scheduler-theme'
+const STORAGE_KEY = 'llm-scheduler-theme'
 const currentTheme = ref<Theme>('system')
 const isDark = ref(false)
 

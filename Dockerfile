@@ -1,4 +1,4 @@
-# Multi-stage Dockerfile for Claude Scheduler
+# Multi-stage Dockerfile for LLM Scheduler
 # Supports development, build, and production environments
 
 # ============================================

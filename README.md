@@ -1,6 +1,6 @@
-# Claude Code Scheduler
+# LLM Code Scheduler
 
-定時與 Claude Code 對話，控制 5 小時限制重置時間，讓你在工作時間內有充足的使用額度。
+定時與 LLM Code 對話，控制 5 小時限制重置時間，讓你在工作時間內有充足的使用額度。
 
 ## 功能特點
 
@@ -24,7 +24,7 @@
 └─────────────────┬───────────────────────────────┘
                   │ CLI spawn
 ┌─────────────────▼───────────────────────────────┐
-│              Claude Code CLI                    │
+│              LLM Code CLI                    │
 │  (claude -p "hi")                              │
 └─────────────────────────────────────────────────┘
 ```
@@ -100,7 +100,7 @@ npm run dev
 
 ## 注意事項
 
-1. **確保 Claude Code CLI 已安裝並登入**
+1. **確保 LLM Code CLI 已安裝並登入**
    ```bash
    npm install -g @anthropic-ai/claude-code
    claude login
@@ -143,7 +143,7 @@ MIT
 | 每週 | 約 40-80 小時 Sonnet 4 |
 | 模型 | 僅 Sonnet 4 (Pro 無法用 Opus) |
 
-### Claude Code CLI 控制參數
+### LLM Code CLI 控制參數
 
 ```bash
 # 最省 token 的執行方式
@@ -158,7 +158,7 @@ claude --allowedTools "Edit,Bash(npm run *)"
 
 ### 權限模式切換
 
-在 Claude Code 互動模式中按 `Shift+Tab` 循環：
+在 LLM Code 互動模式中按 `Shift+Tab` 循環：
 - `normal-mode` - 標準模式，會詢問權限
 - `auto-accept edit on` - 自動接受編輯
 - `plan mode on` - 只讀計劃模式

@@ -63,7 +63,8 @@ function initializeDatabase() {
       cost_usd REAL DEFAULT 0,
       duration_ms INTEGER DEFAULT 0,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (execution_log_id) REFERENCES execution_logs(id)
+      FOREIGN KEY (execution_log_id) REFERENCES execution_logs(id),
+      UNIQUE (session_id, executed_at, prompt_hash)
     );
 
     CREATE TABLE IF NOT EXISTS config (
@@ -103,22 +104,22 @@ function initializeDatabase() {
       db.exec(`ALTER TABLE conversations ADD COLUMN prompt_hash TEXT`)
     }
 
-    // Try to drop the unique index if it exists (in case it was created with bad data)
-    try {
-      db.exec(`DROP INDEX IF EXISTS idx_conversations_unique`)
-    } catch (e) {
-      // Index might not exist, that's fine
-    }
+    // Check if unique constraint exists in table definition
+    const tableSchema = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='conversations'").get() as {sql: string} | undefined
+    const hasUniqueConstraint = tableSchema?.sql?.includes('UNIQUE')
 
-    // Recreate unique index (will fail silently if data has duplicates, but we'll skip it)
-    try {
-      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_unique
-        ON conversations(session_id, executed_at, prompt_hash)`)
-      console.log('[Migration] Unique index created successfully')
-    } catch (e) {
-      // Index creation might fail if there are duplicate values
-      // This is okay - we'll just skip the unique constraint for now
-      console.log('[Migration] Could not create unique index (data may have duplicates):', (e as Error).message)
+    if (!hasUniqueConstraint) {
+      // Try to create unique index for deduplication
+      try {
+        db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_unique
+          ON conversations(session_id, executed_at, prompt_hash)`)
+        console.log('[Migration] Unique index created successfully for deduplication')
+      } catch (e) {
+        console.warn('[Migration] Could not create unique index (duplicate data detected):', (e as Error).message)
+        console.log('[Migration] Will clean up duplicates during backfill phase...')
+      }
+    } else {
+      console.log('[Migration] Unique constraint already exists in table definition')
     }
   } catch (e) {
     console.error('[Migration] Schema migration error:', e)
@@ -137,30 +138,56 @@ function generatePromptHash(prompt: string): string {
 }
 
 /**
- * Backfill existing conversations with prompt_hash
+ * Backfill existing conversations with prompt_hash and remove duplicates
  */
 function backfillPromptHashes() {
   try {
-    const rows = db.prepare('SELECT id, user_prompt FROM conversations WHERE prompt_hash IS NULL LIMIT 1000').all() as Array<{ id: number; user_prompt: string }>
+    const rows = db.prepare('SELECT id, user_prompt, session_id, executed_at FROM conversations WHERE prompt_hash IS NULL LIMIT 1000').all() as Array<{ id: number; user_prompt: string; session_id: string | null; executed_at: string }>
 
     if (rows.length > 0) {
       const updateStmt = db.prepare('UPDATE conversations SET prompt_hash = ? WHERE id = ?')
+      const deleteStmt = db.prepare('DELETE FROM conversations WHERE id = ?')
+      const checkExistingStmt = db.prepare('SELECT id FROM conversations WHERE session_id = ? AND executed_at = ? AND prompt_hash IS NOT NULL LIMIT 1')
+
       let updated = 0
+      let deleted = 0
       let failed = 0
 
       for (const row of rows) {
         try {
           const hash = generatePromptHash(row.user_prompt)
-          updateStmt.run(hash, row.id)
-          updated++
+
+          // Check if a row with the same (session_id, executed_at, hash) already exists
+          const existingRow = checkExistingStmt.get(row.session_id, row.executed_at) as { id: number } | undefined
+
+          if (existingRow && existingRow.id !== row.id) {
+            // A different row with the same session and timestamp already has a hash
+            // Delete this duplicate instead of updating
+            deleteStmt.run(row.id)
+            deleted++
+            console.log(`[Backfill] Deleted duplicate row id=${row.id} (existing row id=${existingRow.id} has hash)`)
+          } else {
+            // Update this row with the hash
+            updateStmt.run(hash, row.id)
+            updated++
+          }
         } catch (e) {
-          // Skip rows that would violate unique constraint
-          console.warn('[Backfill] Skipped row due to constraint:', (e as Error).message)
-          failed++
+          // If update fails due to constraint violation, delete this row
+          const errorMsg = (e as Error).message
+          if (errorMsg.includes('UNIQUE constraint')) {
+            deleteStmt.run(row.id)
+            deleted++
+            console.log(`[Backfill] Deleted duplicate row id=${row.id} (constraint violation)`)
+          } else {
+            console.warn(`[Backfill] Skipped row id=${row.id} due to error:`, errorMsg)
+            failed++
+          }
         }
       }
 
-      console.log(`[Backfill] Updated ${updated} conversations with prompt_hash (${failed} skipped)`)
+      console.log(`[Backfill] Completed: Updated ${updated} conversations with prompt_hash, Deleted ${deleted} duplicates, Failed ${failed}`)
+    } else {
+      console.log('[Backfill] No conversations without prompt_hash found')
     }
   } catch (error) {
     console.error('[Backfill] Error backfilling prompt hashes:', error)
@@ -225,15 +252,15 @@ interface ConversationGroup {
 // 最省 token 的 prompt - 只說 "hi"
 const MINIMAL_PROMPT = 'hi'
 
-// Claude Code CLI 執行選項
-interface ClaudeCodeOptions {
+// LLM Code CLI 執行選項
+interface LLMCodeOptions {
   permissionMode?: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions'
   skipPermissions?: boolean
   maxTurns?: number
   outputFormat?: 'text' | 'json' | 'stream-json'
 }
 
-async function executeClaudeCode(scheduleId: number, scheduleName: string, prompt: string): Promise<void> {
+async function executeLLMCode(scheduleId: number, scheduleName: string, prompt: string): Promise<void> {
   const startTime = Date.now()
   
   // 建立 pending log
@@ -245,8 +272,8 @@ async function executeClaudeCode(scheduleId: number, scheduleName: string, promp
   const logId = result.lastInsertRowid
 
   try {
-    // 使用 claude CLI 執行對話 - 使用最省 token 的設定
-    const response = await runClaudeCommand(prompt, {
+    // 使用 llm CLI 執行對話 - 使用最省 token 的設定
+    const response = await runLLMCommand(prompt, {
       maxTurns: 1,              // 限制單輪對話
       outputFormat: 'text',     // 純文字輸出
       skipPermissions: true     // 跳過權限提示以減少互動
@@ -298,27 +325,27 @@ async function executeClaudeCode(scheduleId: number, scheduleName: string, promp
   }
 }
 
-function runClaudeCommand(prompt: string, options: ClaudeCodeOptions = {}): Promise<string> {
+function runLLMCommand(prompt: string, options: LLMCodeOptions = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     const args: string[] = ['-p', prompt]
-    
+
     // 輸出格式
     args.push('--output-format', options.outputFormat || 'text')
-    
+
     // 權限模式 - Pro 訂閱下建議使用 plan 模式做最小對話
     if (options.skipPermissions) {
       args.push('--dangerously-skip-permissions')
     }
-    
+
     // 限制對話輪數 - 減少 token 消耗
     if (options.maxTurns) {
       args.push('--max-turns', options.maxTurns.toString())
     }
 
-    console.log(`[Claude] Running: claude ${args.join(' ')}`)
+    console.log(`[LLM] Running: claude ${args.join(' ')}`)
 
-    // 使用 claude CLI 執行
-    const claude = spawn('claude', args, {
+    // 使用 llm CLI 執行
+    const llm = spawn('claude', args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env }
     })
@@ -326,30 +353,30 @@ function runClaudeCommand(prompt: string, options: ClaudeCodeOptions = {}): Prom
     let stdout = ''
     let stderr = ''
 
-    claude.stdout.on('data', (data) => {
+    llm.stdout.on('data', (data) => {
       stdout += data.toString()
     })
 
-    claude.stderr.on('data', (data) => {
+    llm.stderr.on('data', (data) => {
       stderr += data.toString()
     })
 
-    claude.on('close', (code) => {
+    llm.on('close', (code) => {
       if (code === 0) {
         resolve(stdout.trim())
       } else {
-        reject(new Error(stderr || `Claude exited with code ${code}`))
+        reject(new Error(stderr || `LLM exited with code ${code}`))
       }
     })
 
-    claude.on('error', (err) => {
+    llm.on('error', (err) => {
       reject(err)
     })
 
     // 設定 30 秒超時
     setTimeout(() => {
-      claude.kill()
-      reject(new Error('Claude command timeout after 30s'))
+      llm.kill()
+      reject(new Error('LLM command timeout after 30s'))
     }, 30000)
   })
 }
@@ -733,7 +760,7 @@ function setupSchedule(schedule: Schedule): void {
   if (!schedule.enabled) return
 
   const task = cron.schedule(schedule.cron_expression, () => {
-    executeClaudeCode(schedule.id, schedule.name, schedule.prompt)
+    executeLLMCode(schedule.id, schedule.name, schedule.prompt)
   }, {
     timezone: 'Asia/Taipei'
   })
@@ -890,7 +917,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       }
 
       // 非同步執行，立即回應
-      executeClaudeCode(schedule.id, schedule.name, schedule.prompt)
+      executeLLMCode(schedule.id, schedule.name, schedule.prompt)
       jsonResponse(res, { success: true, message: 'Execution started' })
       return
     }
@@ -1025,7 +1052,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
       try {
         // 執行對話
-        const response = await runClaudeCommand(prompt, {
+        const response = await runLLMCommand(prompt, {
           maxTurns: 1,
           outputFormat: 'text',
           skipPermissions: true
@@ -1881,14 +1908,14 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
             const costUsd = c.cost_usd || c.costUsd || 0
             const durationMs = c.duration_ms || c.durationMs || 0
 
-            // VALIDATION: Warn if userPrompt looks like a Claude response (data corruption detection)
+            // VALIDATION: Warn if userPrompt looks like a LLM response (data corruption detection)
             if (
               userPrompt.startsWith('Hi! I\'m Claude') ||
               userPrompt.includes('I\'m here to help') ||
               userPrompt.includes('I\'m Claude')
             ) {
               console.warn(
-                '[SaveConversations] SUSPICIOUS: userPrompt looks like Claude response instead of user prompt:',
+                '[SaveConversations] SUSPICIOUS: userPrompt looks like LLM response instead of user prompt:',
                 userPrompt.substring(0, 200)
               )
             }
@@ -2223,7 +2250,7 @@ const server = createServer(handleRequest)
 server.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════════════════════════╗
-║         Claude Code Scheduler Server v1.0.0                ║
+║         LLM Code Scheduler Server v1.0.0                   ║
 ╠════════════════════════════════════════════════════════════╣
 ║  🌐 Server running at http://localhost:${PORT}               ║
 ║  📁 Database: ${dbPath}
