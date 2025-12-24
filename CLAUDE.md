@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to LLM Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
@@ -16,8 +16,8 @@ LLM Code Scheduler is a dual-purpose application:
 npm install
 
 # Start both servers concurrently (recommended)
-npm run dev              # Frontend on port 5173
 npm run server          # Backend on port 3001 (in separate terminal)
+npm run dev            # Frontend on port 5173
 
 # Build frontend for production
 npm run build
@@ -106,6 +106,11 @@ LLM Code CLI
 - Sources: 'scheduled', 'quick_chat', 'history_import'
 - Contains both user_prompt and assistant_response
 - Linked to execution_logs via execution_log_id
+- **project_path** field stores the LLM projects directory path for grouping
+
+**project_sync_status**: Tracks imports from projects JSONL files
+- Records last_sync_timestamp per project
+- Stores total_conversations_synced and last_sync_status
 
 **config**: Key-value configuration storage
 - history_paths: Array of LLM history.jsonl paths
@@ -117,12 +122,14 @@ Single Pinia store at `src/stores/scheduler.ts`:
 - Manages all schedules, logs, conversations, usage stats
 - **Field name transformation**: Backend uses snake_case (user_prompt), frontend expects camelCase (userPrompt)
 - All API responses are transformed in store actions
+- Project list (`availableProjects`) is fetched and cached
+- Selected project filter and sort order are tracked in store
 
 ### Key Backend Functions
 
 **server/index.ts**:
 - `setupSchedule()`: Registers cron jobs with node-cron
-- `executeSchedule()`: Spawns LLM CLI with `claude -p "prompt" --output-format text --dangerously-skip-permissions --max-turns 1`
+- `executeLLMCode()`: Spawns LLM CLI with `claude -p "prompt" --output-format text --dangerously-skip-permissions --max-turns 1`
 - `readHistory()`: Parses `~/.claude/history.jsonl` (user prompts only, no responses)
 - `readProjectsJSONL()`: Parses `~/.claude/projects/{project}/{session-id}.jsonl` (complete transcripts with responses)
 - `pairConversations()`: Matches assistant messages to user messages via parentUuid
@@ -157,7 +164,7 @@ Assistant messages link to user messages via `parentUuid` field.
 
 ### Frontend Components
 
-**App.vue**: Two-tab layout (排程管理 / 對話記錄管理)
+**App.vue**: Two-tab layout (Scheduler / Conversations)
 
 **Scheduler Tab**:
 - StatusPanel: Shows current usage limits
@@ -167,17 +174,19 @@ Assistant messages link to user messages via `parentUuid` field.
 - LogsPanel: Execution history
 
 **Conversations Tab**:
-- ConversationPanel: Full conversation management with dual view modes
+- ConversationPanel: Full conversation management with THREE view modes
   - **List View**: Individual conversation expand/collapse (50 per page)
   - **Analysis View**: Timeline visualization of Q&A pairs with session grouping
-  - "分類並儲存": Imports from history.jsonl + merges with execution_logs
-  - "從 Projects 匯入": Imports complete conversations from Projects JSONL
-  - "更新對話": Refresh button to load new conversations from latest timestamp
-  - Search, filter by source/category
+  - **Project View** (NEW): Groups conversations by LLM project with statistics
+    - Collapsible project cards showing conversation count, tokens, cost
+    - Chronologically sorted conversations within each project
+    - Expandable state managed via Set<string> in parent component
+  - Search, filter by source/category/project
   - MarkdownRenderer: Renders assistant responses as full Markdown with syntax highlighting
   - ConversationAnalysisView: Timeline layout showing chronological Q&A relationships
+  - ConversationProjectView: Project-based grouping with collapsible UI
 
-**New Components (v1.1)**:
+**Components**:
 - **MarkdownRenderer.vue**:
   - Parses and renders Markdown (h1-h6, lists, tables, quotes, code blocks)
   - Syntax highlighting via highlight.js (190+ languages)
@@ -191,6 +200,13 @@ Assistant messages link to user messages via `parentUuid` field.
   - Q&A pair visualization with arrow connectors
   - Integrated MarkdownRenderer for both user prompts and responses
   - Token/cost metadata per interaction
+
+- **ConversationProjectView.vue** (NEW):
+  - Project-based grouping computed from conversations array
+  - Collapsible project cards with summary statistics
+  - Takes `expandedProjects: Set<string>` prop to track UI state
+  - Emits `toggle-expand` event when user clicks project header
+  - Uses same MarkdownRenderer for response display
 
 ### Token & Cost Tracking
 
@@ -219,6 +235,21 @@ When adding new API endpoints that return database records:
 { userPrompt: "...", assistantResponse: "..." }
 ```
 
+### View Mode Management
+The ConversationPanel uses a view mode ref to switch between List/Analysis/Project:
+```typescript
+const viewMode = ref<'list' | 'analysis' | 'project'>('list')
+const expandedProjects = ref<Set<string>>(new Set())
+
+function toggleProjectExpand(projectPath: string) {
+  if (expandedProjects.value.has(projectPath)) {
+    expandedProjects.value.delete(projectPath)
+  } else {
+    expandedProjects.value.add(projectPath)
+  }
+}
+```
+
 ### Error Handling in Execution
 - Schedule execution errors are logged to execution_logs.error
 - Frontend displays error toasts with retry options
@@ -244,14 +275,16 @@ When implementing conversation features:
 3. For `history_import` from history.jsonl: Only user prompts, assistant_response will be null unless correlated
 4. Always handle null assistant_response gracefully in UI
 5. Assistant responses are rendered as Markdown with syntax highlighting via MarkdownRenderer
-6. Conversation Analysis View provides chronological timeline and session-based grouping
+6. Use ConversationAnalysisView for timeline/session-based views
+7. Use ConversationProjectView for project-based grouping
+8. ConversationPanel filters and sorts the data, views only consume and display it
 
 The conversation pairing algorithm in `pairConversations()` matches based on `parentUuid` linkage - do not assume sequential pairing.
 
 ## Debugging & Troubleshooting
 
 ### Backend Debugging
-- Backend logs are printed to stdout with prefixes: `[Migration]`, `[Backfill]`, `[ImportProjects]`, `[Groups]`, etc.
+- Backend logs are printed to stdout with prefixes: `[Migration]`, `[Backfill]`, `[ImportProjects]`, `[Groups]`, `[LLM]`, etc.
 - Database queries can be logged by adding console statements near `db.prepare()` calls
 - Common debugging endpoints:
   - `GET /api/conversations/debug` - Database statistics and data validation
@@ -344,19 +377,22 @@ npm run preview     # Preview production build locally on port 4173
 ### Type Safety
 - Frontend: `vue-tsc` validates Vue components and TypeScript
 - Backend: No separate type check (use IDE or `tsc --noEmit`)
-- Database types: Defined inline in `server/index.ts` (e.g., `Schedule`, `ExecutionLog`, `ExecutionLog`)
+- Database types: Defined inline in `server/index.ts` (e.g., `Schedule`, `ExecutionLog`)
 - Store types: Defined in `src/stores/scheduler.ts` with Pinia composition API
+- Conversation types: Defined in `src/types/index.ts`
 
 ### Import Paths
 - Frontend: `@/` resolves to `src/` (configured in `vite.config.ts`)
 - Backend: Relative imports only (no path aliases)
 - Components: Import from `@/components/`
 - Stores: Import from `@/stores/`
+- Utils: Import from `@/lib/utils`
+- Types: Import from `@/types`
 
 ## Port Configuration
 
 - **Frontend (Vite)**: 5173 (configured in `vite.config.ts`)
-- **Backend (Node.js)**: 3001 (set via `process.env.PORT` or default in `server/index.ts:2199`)
+- **Backend (Node.js)**: 3001 (set via `process.env.PORT` or default in `server/index.ts`)
 - **Vite proxy**: `/api/*` routes to `http://localhost:3001`
 
 To change ports:
@@ -367,3 +403,12 @@ npm run dev -- --port 8000
 # Backend
 PORT=4000 npm run server
 ```
+
+## Internationalization (i18n)
+
+- Language files: `src/locales/` (en.ts, zh-TW.ts, zh-CN.ts)
+- Setup: Vue i18n integrated in `src/main.ts` and `src/locales/index.ts`
+- Locale storage key: `llm-scheduler-locale` (localStorage)
+- Theme storage key: `llm-scheduler-theme` (localStorage)
+- Use `useLocale()` composable to access `setLocale()` function
+- Use `useI18n()` from vue-i18n to access `t()` translation function in templates
