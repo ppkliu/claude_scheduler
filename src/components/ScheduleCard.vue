@@ -38,22 +38,22 @@ async function handleDelete() {
 </script>
 
 <template>
-  <div 
+  <div
     :class="[
       'bg-card border rounded-xl p-5 transition-all duration-300',
-      schedule.enabled 
-        ? 'border-primary/30 shadow-lg shadow-primary/5' 
+      schedule.enabled
+        ? 'border-primary/30 shadow-lg shadow-primary/5'
         : 'border-border opacity-60'
     ]"
   >
     <!-- Header -->
     <div class="flex items-start justify-between mb-4">
       <div class="flex items-center gap-3">
-        <div 
+        <div
           :class="[
             'w-12 h-12 rounded-xl flex items-center justify-center font-mono text-lg font-bold',
-            schedule.enabled 
-              ? 'bg-primary/10 text-primary' 
+            schedule.enabled
+              ? 'bg-primary/10 text-primary'
               : 'bg-muted text-muted-foreground'
           ]"
         >
@@ -67,14 +67,14 @@ async function handleDelete() {
 
       <!-- Menu -->
       <div class="relative">
-        <button 
+        <button
           @click="showMenu = !showMenu"
           class="p-2 rounded-lg hover:bg-muted transition-colors"
         >
           <MoreVertical class="w-4 h-4 text-muted-foreground" />
         </button>
-        
-        <div 
+
+        <div
           v-if="showMenu"
           class="absolute right-0 top-10 w-40 bg-card border border-border rounded-lg shadow-xl py-1 z-10"
           @mouseleave="showMenu = false"
@@ -111,7 +111,7 @@ async function handleDelete() {
         <PowerOff v-else class="w-4 h-4" />
         {{ schedule.enabled ? t('schedule.disable') : t('schedule.enable') }}
       </button>
-      
+
       <button
         @click="handleExecute"
         :disabled="executing"
@@ -128,7 +128,7 @@ async function handleDelete() {
     </div>
 
     <!-- Status Indicator -->
-    <div 
+    <div
       v-if="schedule.enabled"
       class="absolute -top-1 -right-1 w-3 h-3 bg-primary rounded-full animate-pulse-glow"
     />
