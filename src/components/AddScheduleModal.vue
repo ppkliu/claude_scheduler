@@ -19,7 +19,7 @@ const saving = ref(false)
 
 async function handleSubmit() {
   if (!name.value.trim()) return
-  
+
   saving.value = true
   const result = await store.createSchedule({
     name: name.value,
@@ -28,7 +28,7 @@ async function handleSubmit() {
     prompt: prompt.value || 'hi',
     enabled: true
   })
-  
+
   if (result.success) {
     emit('close')
   }
@@ -39,17 +39,17 @@ async function handleSubmit() {
 <template>
   <div class="fixed inset-0 z-50 flex items-center justify-center">
     <!-- Backdrop -->
-    <div 
+    <div
       class="absolute inset-0 bg-black/60 backdrop-blur-sm"
       @click="emit('close')"
     />
-    
+
     <!-- Modal -->
     <div class="relative w-full max-w-md bg-card border border-border rounded-2xl shadow-2xl animate-fade-in">
       <!-- Header -->
       <div class="flex items-center justify-between px-6 py-4 border-b border-border">
         <h2 class="text-lg font-semibold">{{ t('addSchedule.title') }}</h2>
-        <button 
+        <button
           @click="emit('close')"
           class="p-2 rounded-lg hover:bg-muted transition-colors"
         >
