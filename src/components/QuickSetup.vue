@@ -2,10 +2,12 @@
 import { ref, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useSchedulerStore } from '@/stores/scheduler'
+import { useToast } from '@/composables/useToast'
 import { Zap, Clock } from 'lucide-vue-next'
 
 const { t } = useI18n()
 const store = useSchedulerStore()
+const { success, error: showError } = useToast()
 const startHour = ref(4)
 const setting = ref(false)
 
@@ -19,8 +21,21 @@ const previewHours = computed(() => {
 
 async function handleSetup() {
   setting.value = true
-  await store.setup5HourPreset(startHour.value)
-  setting.value = false
+  try {
+    const result = await store.setup5HourPreset(startHour.value)
+
+    if (result.success) {
+      success(t('quickSetup.success'))
+      // Wait for schedules to be fetched
+      await new Promise(resolve => setTimeout(resolve, 500))
+    } else {
+      showError(result.error || t('quickSetup.error'))
+    }
+  } catch (e) {
+    showError(t('quickSetup.error'))
+  } finally {
+    setting.value = false
+  }
 }
 </script>
 
@@ -36,11 +51,11 @@ async function handleSetup() {
         <p class="text-sm text-muted-foreground mb-4">
           {{ t('quickSetup.description') }}
         </p>
-        
+
         <!-- Preview -->
         <div class="flex flex-wrap gap-2">
-          <span 
-            v-for="hour in previewHours" 
+          <span
+            v-for="hour in previewHours"
             :key="hour"
             class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-card rounded-lg text-sm font-mono border border-border"
           >

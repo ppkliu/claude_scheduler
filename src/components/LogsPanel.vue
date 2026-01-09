@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
 import { useSchedulerStore } from '@/stores/scheduler'
-import { formatDateTime, formatTokens, formatCost } from '@/lib/utils'
+import { formatDateTime, formatTokens } from '@/lib/utils'
 import { CheckCircle2, XCircle, Clock, Loader2 } from 'lucide-vue-next'
 
 const { t } = useI18n()
@@ -43,19 +43,18 @@ function getStatusClass(status: string) {
             <th class="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{{ t('logs.schedule') }}</th>
             <th class="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">{{ t('logs.time') }}</th>
             <th class="px-6 py-3 text-right text-xs font-medium text-muted-foreground uppercase tracking-wider">{{ t('logs.tokens') }}</th>
-            <th class="px-6 py-3 text-right text-xs font-medium text-muted-foreground uppercase tracking-wider">{{ t('logs.cost') }}</th>
             <th class="px-6 py-3 text-right text-xs font-medium text-muted-foreground uppercase tracking-wider">{{ t('logs.duration') }}</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-border">
-          <tr 
-            v-for="log in store.logs" 
+          <tr
+            v-for="log in store.logs"
             :key="log.id"
             class="hover:bg-muted/20 transition-colors"
           >
             <!-- Status -->
             <td class="px-6 py-4">
-              <span 
+              <span
                 :class="[
                   'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium',
                   getStatusClass(log.status)
@@ -68,17 +67,17 @@ function getStatusClass(status: string) {
                 {{ log.status === 'success' ? t('logs.statusSuccess') : log.status === 'failed' ? t('logs.statusFailed') : t('logs.statusPending') }}
               </span>
             </td>
-            
+
             <!-- Schedule Name -->
             <td class="px-6 py-4">
               <p class="font-medium">{{ log.scheduleName }}</p>
             </td>
-            
+
             <!-- Time -->
             <td class="px-6 py-4">
               <p class="text-sm font-mono text-muted-foreground">{{ formatDateTime(log.executedAt) }}</p>
             </td>
-            
+
             <!-- Tokens -->
             <td class="px-6 py-4 text-right">
               <p class="text-sm font-mono">{{ formatTokens(log.totalTokens) }}</p>
@@ -86,12 +85,7 @@ function getStatusClass(status: string) {
                 {{ formatTokens(log.inputTokens) }} / {{ formatTokens(log.outputTokens) }}
               </p>
             </td>
-            
-            <!-- Cost -->
-            <td class="px-6 py-4 text-right">
-              <p class="text-sm font-mono text-emerald-500">{{ formatCost(log.costUsd) }}</p>
-            </td>
-            
+
             <!-- Duration -->
             <td class="px-6 py-4 text-right">
               <p class="text-sm font-mono text-muted-foreground">{{ log.durationMs }}ms</p>

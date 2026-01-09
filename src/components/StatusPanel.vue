@@ -2,8 +2,8 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useSchedulerStore } from '@/stores/scheduler'
-import { formatRelativeTime, formatTokens, formatCost } from '@/lib/utils'
-import { Activity, Coins, Clock, CheckCircle2 } from 'lucide-vue-next'
+import { formatRelativeTime, formatTokens } from '@/lib/utils'
+import { Activity, Coins, Clock } from 'lucide-vue-next'
 
 const { t } = useI18n()
 const store = useSchedulerStore()
@@ -15,7 +15,7 @@ const nextExecutionTime = computed(() => {
 </script>
 
 <template>
-  <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+  <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
     <!-- Active Schedules -->
     <div class="bg-card border border-border rounded-xl p-5">
       <div class="flex items-center gap-3">
@@ -59,17 +59,5 @@ const nextExecutionTime = computed(() => {
       </div>
     </div>
 
-    <!-- Today Cost -->
-    <div class="bg-card border border-border rounded-xl p-5">
-      <div class="flex items-center gap-3">
-        <div class="w-10 h-10 rounded-lg bg-emerald-500/10 flex items-center justify-center">
-          <CheckCircle2 class="w-5 h-5 text-emerald-500" />
-        </div>
-        <div>
-          <p class="text-2xl font-bold font-mono">{{ formatCost(store.todayCost) }}</p>
-          <p class="text-sm text-muted-foreground">{{ t('status.todayCost') }}</p>
-        </div>
-      </div>
-    </div>
   </div>
 </template>
