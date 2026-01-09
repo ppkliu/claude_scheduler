@@ -11,14 +11,16 @@ import QuickChatPanel from './components/QuickChatPanel.vue'
 import AddScheduleModal from './components/AddScheduleModal.vue'
 import ConversationPanel from './components/ConversationPanel.vue'
 import SettingsModal from './components/SettingsModal.vue'
-import { Clock, Plus, Zap, MessageCircle, Calendar, Settings } from 'lucide-vue-next'
+import ToastContainer from './components/ToastContainer.vue'
+import PlanPanel from './components/PlanPanel.vue'
+import { Clock, Plus, Zap, MessageCircle, Calendar, Settings, FileText } from 'lucide-vue-next'
 
 const { t } = useI18n()
 const { initLocale } = useLocale()
 const store = useSchedulerStore()
 const showAddModal = ref(false)
 const showSettingsModal = ref(false)
-const mainTab = ref<'scheduler' | 'conversations'>('scheduler')
+const mainTab = ref<'scheduler' | 'conversations' | 'plans'>('scheduler')
 const schedulerSubTab = ref<'schedules' | 'logs'>('schedules')
 
 onMounted(async () => {
@@ -41,20 +43,23 @@ onMounted(async () => {
 
 <template>
   <div class="min-h-screen bg-background">
+    <!-- Toast Container -->
+    <ToastContainer />
+
     <!-- Header (contextual) -->
     <header class="border-b border-border bg-card/50 backdrop-blur-sm sticky top-0 z-50">
       <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div class="flex items-center justify-between h-16">
           <div class="flex items-center gap-3">
             <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-primary/20 to-primary/5 border border-primary/30 flex items-center justify-center">
-              <component :is="mainTab === 'scheduler' ? Calendar : MessageCircle" class="w-5 h-5 text-primary" />
+              <component :is="mainTab === 'scheduler' ? Calendar : mainTab === 'conversations' ? MessageCircle : FileText" class="w-5 h-5 text-primary" />
             </div>
             <div>
               <h1 class="text-lg font-semibold tracking-tight">
-                {{ mainTab === 'scheduler' ? t('app.title') : t('app.conversationsTitle') }}
+                {{ mainTab === 'scheduler' ? t('app.title') : mainTab === 'conversations' ? t('app.conversationsTitle') : t('app.plansTitle') }}
               </h1>
               <p class="text-xs text-muted-foreground">
-                {{ mainTab === 'scheduler' ? t('app.subtitle') : t('app.conversationsSubtitle') }}
+                {{ mainTab === 'scheduler' ? t('app.subtitle') : mainTab === 'conversations' ? t('app.conversationsSubtitle') : t('app.plansSubtitle') }}
               </p>
             </div>
           </div>
@@ -109,6 +114,18 @@ onMounted(async () => {
           >
             <MessageCircle class="w-5 h-5" />
             {{ t('nav.conversations') }}
+          </button>
+          <button
+            @click="mainTab = 'plans'"
+            :class="[
+              'inline-flex items-center gap-2 px-6 py-3 border-b-2 font-medium text-sm transition-all',
+              mainTab === 'plans'
+                ? 'border-primary text-primary'
+                : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
+            ]"
+          >
+            <FileText class="w-5 h-5" />
+            {{ t('nav.plans') }}
           </button>
         </div>
       </div>
@@ -180,6 +197,11 @@ onMounted(async () => {
       <!-- CONVERSATIONS TAB CONTENT -->
       <div v-else-if="mainTab === 'conversations'" class="animate-fade-in">
         <ConversationPanel />
+      </div>
+
+      <!-- PLANS TAB CONTENT -->
+      <div v-else-if="mainTab === 'plans'" class="animate-fade-in">
+        <PlanPanel />
       </div>
     </main>
 

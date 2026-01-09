@@ -28,8 +28,12 @@ export const useSchedulerStore = defineStore('scheduler', () => {
   const historyPaths = ref<string[]>([])
   const currentHistoryPathIndex = ref<number>(0)
 
+  // Plans state
+  const plans = ref<Array<{ filename: string; path: string; date: string; size: number; frontmatter: Record<string, string>; content: string }>>([])
+  const plansLoading = ref(false)
+
   // Computed
-  const enabledSchedules = computed(() => 
+  const enabledSchedules = computed(() =>
     schedules.value.filter(s => s.enabled)
   )
 
@@ -157,14 +161,29 @@ export const useSchedulerStore = defineStore('scheduler', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ startHour })
       })
-      const data = await res.json()
-      if (data.success) {
-        await fetchSchedules()
+
+      if (!res.ok) {
+        const errorData = await res.json()
+        return {
+          success: false,
+          error: errorData.error || 'Failed to apply preset'
+        }
       }
+
+      const data = await res.json()
+
+      if (data.success) {
+        // Wait for backend to complete before fetching
+        await new Promise(resolve => setTimeout(resolve, 300))
+        await fetchSchedules()
+        await fetchStatus()
+      }
+
       return data
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Failed to setup preset'
-      return { success: false, error: error.value }
+      const errorMsg = e instanceof Error ? e.message : 'Failed to setup preset'
+      error.value = errorMsg
+      return { success: false, error: errorMsg }
     } finally {
       loading.value = false
     }
@@ -600,6 +619,52 @@ export const useSchedulerStore = defineStore('scheduler', () => {
     }
   }
 
+  // Plans actions
+  async function fetchPlans(params?: {
+    search?: string
+    startDate?: string
+    endDate?: string
+    sortBy?: 'date' | 'name' | 'size'
+  }) {
+    plansLoading.value = true
+    try {
+      const queryParams = new URLSearchParams()
+      if (params?.search) queryParams.set('search', params.search)
+      if (params?.startDate) queryParams.set('startDate', params.startDate)
+      if (params?.endDate) queryParams.set('endDate', params.endDate)
+      if (params?.sortBy) queryParams.set('sortBy', params.sortBy)
+
+      const res = await fetch(`${API_BASE}/plans?${queryParams}`)
+      const data = await res.json()
+
+      if (data.success) {
+        plans.value = data.data
+      }
+      return data
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Failed to fetch plans'
+      return { success: false, error: error.value }
+    } finally {
+      plansLoading.value = false
+    }
+  }
+
+  async function deletePlan(filename: string) {
+    try {
+      const res = await fetch(`${API_BASE}/plans/${encodeURIComponent(filename)}`, {
+        method: 'DELETE'
+      })
+      const data = await res.json()
+      if (data.success) {
+        await fetchPlans()
+      }
+      return data
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Failed to delete plan'
+      return { success: false, error: error.value }
+    }
+  }
+
   return {
     // State
     schedules,
@@ -655,6 +720,12 @@ export const useSchedulerStore = defineStore('scheduler', () => {
     getHistoryPaths,
     addHistoryPath,
     removeHistoryPath,
-    selectHistoryPath
+    selectHistoryPath,
+    // Plans state
+    plans,
+    plansLoading,
+    // Plans actions
+    fetchPlans,
+    deletePlan
   }
 })

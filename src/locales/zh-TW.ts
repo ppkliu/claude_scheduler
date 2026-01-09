@@ -3,11 +3,14 @@ export default {
     title: 'LLM Code Scheduler',
     subtitle: '5 小時限制重置管理器',
     conversationsTitle: 'LLM 對話記錄',
-    conversationsSubtitle: '對話歷史與分類管理'
+    conversationsSubtitle: '對話歷史與分類管理',
+    plansTitle: '計劃檔案管理',
+    plansSubtitle: '檢視與管理 Claude Code 實作計劃'
   },
   nav: {
     scheduler: '排程管理',
     conversations: '對話記錄管理',
+    plans: '計劃檔案',
     addSchedule: '新增排程'
   },
   status: {
@@ -41,7 +44,9 @@ export default {
     startTime: '起始時間',
     apply: '套用',
     applying: '設定中...',
-    hour: '時'
+    hour: '時',
+    success: '成功套用 5 小時排程',
+    error: '套用排程失敗，請稍後再試。'
   },
   quickChat: {
     title: '快速對話',
@@ -124,6 +129,21 @@ export default {
     listView: '列表視圖',
     analysisView: '分析視圖',
     projectView: '專案視圖'
+  },
+  plans: {
+    search: '搜尋計劃',
+    searchPlaceholder: '以關鍵字或檔名搜尋...',
+    dateRange: '日期範圍',
+    sortBy: '排序方式',
+    sortByDate: '日期（最新優先）',
+    sortByName: '檔名（A-Z）',
+    sortBySize: '大小（最大優先）',
+    applyFilters: '套用篩選',
+    loading: '載入計劃中...',
+    noPlans: '找不到計劃檔案',
+    phases: '實作階段',
+    delete: '刪除',
+    confirmDelete: '確定要刪除 {filename} 嗎？'
   },
   settings: {
     title: '設定',

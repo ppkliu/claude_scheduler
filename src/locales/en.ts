@@ -3,11 +3,14 @@ export default {
     title: 'LLM Code Scheduler',
     subtitle: '5-Hour Limit Reset Manager',
     conversationsTitle: 'LLM Conversations',
-    conversationsSubtitle: 'Conversation History & Management'
+    conversationsSubtitle: 'Conversation History & Management',
+    plansTitle: 'Plans Management',
+    plansSubtitle: 'View and manage Claude Code implementation plans'
   },
   nav: {
     scheduler: 'Scheduler',
     conversations: 'Conversations',
+    plans: 'Plans',
     addSchedule: 'Add Schedule'
   },
   status: {
@@ -41,7 +44,9 @@ export default {
     startTime: 'Start Time',
     apply: 'Apply',
     applying: 'Applying...',
-    hour: 'hour'
+    hour: 'hour',
+    success: 'Successfully applied 5-hour preset',
+    error: 'Failed to apply preset. Please try again.'
   },
   quickChat: {
     title: 'Quick Chat',
@@ -124,6 +129,21 @@ export default {
     listView: 'List View',
     analysisView: 'Analysis View',
     projectView: 'Project View'
+  },
+  plans: {
+    search: 'Search Plans',
+    searchPlaceholder: 'Search by keyword or filename...',
+    dateRange: 'Date Range',
+    sortBy: 'Sort By',
+    sortByDate: 'Date (Newest First)',
+    sortByName: 'Name (A-Z)',
+    sortBySize: 'Size (Largest First)',
+    applyFilters: 'Apply Filters',
+    loading: 'Loading plans...',
+    noPlans: 'No plans found',
+    phases: 'Implementation Phases',
+    delete: 'Delete',
+    confirmDelete: 'Are you sure you want to delete {filename}?'
   },
   settings: {
     title: 'Settings',
