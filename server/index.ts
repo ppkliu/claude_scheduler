@@ -3,7 +3,7 @@ import Database from 'better-sqlite3'
 import cron, { ScheduledTask } from 'node-cron'
 import { spawn } from 'child_process'
 import { resolve, join } from 'path'
-import { createReadStream, existsSync, readdirSync, readFileSync, statSync } from 'fs'
+import { createReadStream, existsSync, readdirSync, readFileSync, statSync, unlinkSync } from 'fs'
 import { createInterface } from 'readline'
 import { homedir } from 'os'
 import { createHash } from 'crypto'
@@ -262,7 +262,7 @@ interface LLMCodeOptions {
 
 async function executeLLMCode(scheduleId: number, scheduleName: string, prompt: string): Promise<void> {
   const startTime = Date.now()
-  
+
   // 建立 pending log
   const insertLog = db.prepare(`
     INSERT INTO execution_logs (schedule_id, schedule_name, status, response)
@@ -285,7 +285,7 @@ async function executeLLMCode(scheduleId: number, scheduleName: string, prompt: 
 
     // 更新 log
     const updateLog = db.prepare(`
-      UPDATE execution_logs 
+      UPDATE execution_logs
       SET status = 'success',
           input_tokens = ?,
           output_tokens = ?,
@@ -313,7 +313,7 @@ async function executeLLMCode(scheduleId: number, scheduleName: string, prompt: 
     const errorMessage = error instanceof Error ? error.message : String(error)
 
     const updateLog = db.prepare(`
-      UPDATE execution_logs 
+      UPDATE execution_logs
       SET status = 'failed',
           duration_ms = ?,
           error = ?
@@ -771,11 +771,11 @@ function setupSchedule(schedule: Schedule): void {
 
 function initializeSchedules(): void {
   const schedules = db.prepare('SELECT * FROM schedules WHERE enabled = 1').all() as Schedule[]
-  
+
   for (const schedule of schedules) {
     setupSchedule(schedule)
   }
-  
+
   console.log(`\n🚀 Initialized ${schedules.length} schedule(s)\n`)
 }
 
@@ -798,6 +798,20 @@ function parseBody(req: IncomingMessage): Promise<Record<string, unknown>> {
     })
     req.on('error', reject)
   })
+}
+
+function parsePlanFrontmatter(content: string): Record<string, string> {
+  const frontmatter: Record<string, string> = {}
+  const lines = content.split('\n').slice(0, 20)
+
+  for (const line of lines) {
+    const match = line.match(/\*\*(.+?)\*\*:\s*(.+)/)
+    if (match) {
+      frontmatter[match[1].toLowerCase()] = match[2].trim()
+    }
+  }
+
+  return frontmatter
 }
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -836,13 +850,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       }
 
       const cronExpression = `${minute} ${hour} * * *`
-      
+
       const insert = db.prepare(`
         INSERT INTO schedules (name, cron_expression, hour, minute, enabled, prompt)
         VALUES (?, ?, ?, ?, ?, ?)
       `)
       const result = insert.run(name, cronExpression, hour, minute, enabled ? 1 : 0, prompt)
-      
+
       const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(result.lastInsertRowid) as Schedule
       setupSchedule(schedule)
 
@@ -873,7 +887,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       const cronExpression = `${newMinute} ${newHour} * * *`
 
       const update = db.prepare(`
-        UPDATE schedules 
+        UPDATE schedules
         SET name = ?, cron_expression = ?, hour = ?, minute = ?, enabled = ?, prompt = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `)
@@ -897,10 +911,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     // DELETE /api/schedules/:id - 刪除排程
     if (path.match(/^\/api\/schedules\/\d+$/) && method === 'DELETE') {
       const id = parseInt(path.split('/').pop()!)
-      
+
       scheduledTasks.get(id)?.stop()
       scheduledTasks.delete(id)
-      
+
       db.prepare('DELETE FROM schedules WHERE id = ?').run(id)
       jsonResponse(res, { success: true })
       return
@@ -910,7 +924,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     if (path.match(/^\/api\/schedules\/\d+\/execute$/) && method === 'POST') {
       const id = parseInt(path.split('/')[3])
       const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(id) as Schedule
-      
+
       if (!schedule) {
         jsonResponse(res, { success: false, error: 'Schedule not found' }, 404)
         return
@@ -926,13 +940,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     if (path === '/api/logs' && method === 'GET') {
       const limit = parseInt(url.searchParams.get('limit') || '50')
       const offset = parseInt(url.searchParams.get('offset') || '0')
-      
+
       const logs = db.prepare(`
-        SELECT * FROM execution_logs 
-        ORDER BY executed_at DESC 
+        SELECT * FROM execution_logs
+        ORDER BY executed_at DESC
         LIMIT ? OFFSET ?
       `).all(limit, offset)
-      
+
       const total = (db.prepare('SELECT COUNT(*) as count FROM execution_logs').get() as { count: number }).count
 
       jsonResponse(res, { success: true, data: { logs, total, limit, offset } })
@@ -942,15 +956,15 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     // GET /api/stats - 取得統計資料
     if (path === '/api/stats' && method === 'GET') {
       const today = new Date().toISOString().split('T')[0]
-      
+
       const todayStats = db.prepare(`
-        SELECT 
+        SELECT
           COUNT(*) as execution_count,
           SUM(input_tokens) as total_input_tokens,
           SUM(output_tokens) as total_output_tokens,
           SUM(total_tokens) as total_tokens,
           SUM(cost_usd) as total_cost_usd
-        FROM execution_logs 
+        FROM execution_logs
         WHERE date(executed_at) = ?
       `).get(today) as {
         execution_count: number
@@ -961,8 +975,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       }
 
       const lastExecution = db.prepare(`
-        SELECT * FROM execution_logs 
-        ORDER BY executed_at DESC 
+        SELECT * FROM execution_logs
+        ORDER BY executed_at DESC
         LIMIT 1
       `).get()
 
@@ -972,7 +986,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       const enabledSchedules = db.prepare('SELECT * FROM schedules WHERE enabled = 1 ORDER BY hour, minute').all() as Schedule[]
       const now = new Date()
       const currentMinutes = now.getHours() * 60 + now.getMinutes()
-      
+
       let nextExecution = null
       for (const s of enabledSchedules) {
         const scheduleMinutes = s.hour * 60 + s.minute
@@ -1119,41 +1133,100 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       return
     }
 
-    // POST /api/presets/5hour - 快速設定 5 小時間隔
+    // POST /api/presets/5hour - 快速設定 5 小時間隔 (WITH TRANSACTION SAFETY)
     if (path === '/api/presets/5hour' && method === 'POST') {
-      const body = await parseBody(req)
-      const { startHour = 4 } = body as { startHour?: number }
+      try {
+        const body = await parseBody(req)
+        const { startHour = 4 } = body as { startHour?: number }
 
-      // 清除現有排程
-      db.prepare('DELETE FROM schedules').run()
-      scheduledTasks.forEach(task => task.stop())
-      scheduledTasks.clear()
+        // Validate input
+        if (typeof startHour !== 'number' || startHour < 0 || startHour > 23) {
+          jsonResponse(res, {
+            success: false,
+            error: 'Invalid start hour. Must be between 0 and 23.'
+          }, 400)
+          return
+        }
 
-      // 建立 5 小時間隔的排程: startHour, +5, +10, +15, +20
-      const hours = [
-        startHour,
-        (startHour + 5) % 24,
-        (startHour + 10) % 24,
-        (startHour + 15) % 24,
-        (startHour + 20) % 24
-      ].sort((a, b) => a - b)
+        // Calculate 5 hours
+        const hours = [
+          startHour,
+          (startHour + 5) % 24,
+          (startHour + 10) % 24,
+          (startHour + 15) % 24,
+          (startHour + 20) % 24
+        ].sort((a, b) => a - b)
 
-      const insert = db.prepare(`
-        INSERT INTO schedules (name, cron_expression, hour, minute, enabled, prompt)
-        VALUES (?, ?, ?, 0, 1, ?)
-      `)
+        // BEGIN TRANSACTION
+        const transaction = db.transaction(() => {
+          // Step 1: Delete related execution logs first (foreign key constraint)
+          db.prepare('DELETE FROM execution_logs WHERE schedule_id IS NOT NULL').run()
 
-      const schedules: Schedule[] = []
-      for (const hour of hours) {
-        const name = `Reset @ ${hour.toString().padStart(2, '0')}:00`
-        const cronExpression = `0 ${hour} * * *`
-        const result = insert.run(name, cronExpression, hour, MINIMAL_PROMPT)
-        const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(result.lastInsertRowid) as Schedule
-        schedules.push(schedule)
-        setupSchedule(schedule)
+          // Step 2: Clear existing schedules in database
+          db.prepare('DELETE FROM schedules').run()
+
+          // Step 3: Insert new schedules
+          const insert = db.prepare(`
+            INSERT INTO schedules (name, cron_expression, hour, minute, enabled, prompt)
+            VALUES (?, ?, ?, 0, 1, ?)
+          `)
+
+          const schedules: Schedule[] = []
+          for (const hour of hours) {
+            const name = `Reset @ ${hour.toString().padStart(2, '0')}:00`
+            const cronExpression = `0 ${hour} * * *`
+            const result = insert.run(name, cronExpression, hour, MINIMAL_PROMPT)
+            const schedule = db.prepare('SELECT * FROM schedules WHERE id = ?').get(result.lastInsertRowid) as Schedule
+            schedules.push(schedule)
+          }
+
+          // Verify 5 schedules were created
+          if (schedules.length !== 5) {
+            throw new Error(`Expected 5 schedules, but created ${schedules.length}`)
+          }
+
+          return schedules
+        })
+
+        // Execute transaction (atomic operation)
+        const schedules = transaction()
+
+        // Step 4: Stop old cron tasks (AFTER database transaction succeeds)
+        scheduledTasks.forEach(task => {
+          try {
+            task.stop()
+          } catch (e) {
+            console.error('Failed to stop task:', e)
+            // Log but don't fail - tasks will be cleaned up on next restart
+          }
+        })
+        scheduledTasks.clear()
+
+        // Step 5: Setup new cron tasks
+        for (const schedule of schedules) {
+          try {
+            setupSchedule(schedule)
+          } catch (e) {
+            console.error(`Failed to setup schedule ${schedule.id}:`, e)
+            // Log but don't fail - schedule exists in DB and will restart on server reboot
+          }
+        }
+
+        console.log(`✅ 5-hour preset applied: ${hours.join(', ')}`)
+
+        jsonResponse(res, {
+          success: true,
+          data: schedules,
+          message: '5-hour preset applied successfully'
+        }, 201)
+
+      } catch (e) {
+        console.error('Failed to apply 5-hour preset:', e)
+        jsonResponse(res, {
+          success: false,
+          error: e instanceof Error ? e.message : 'Failed to apply preset'
+        }, 500)
       }
-
-      jsonResponse(res, { success: true, data: schedules }, 201)
       return
     }
 
@@ -2230,14 +2303,131 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       return
     }
 
+    // GET /api/plans - 取得計劃檔案列表
+    if (path === '/api/plans' && method === 'GET') {
+      try {
+        const search = url.searchParams.get('search') || ''
+        const startDate = url.searchParams.get('startDate') || ''
+        const endDate = url.searchParams.get('endDate') || ''
+        const sortBy = url.searchParams.get('sortBy') || 'date'
+
+        const plansDir = join(homedir(), '.claude', 'plans')
+
+        // Check if plans directory exists
+        if (!existsSync(plansDir)) {
+          jsonResponse(res, { success: true, data: [] })
+          return
+        }
+
+        // Read all .md files
+        const files = readdirSync(plansDir)
+          .filter(f => f.endsWith('.md'))
+          .map(filename => {
+            const filePath = join(plansDir, filename)
+            try {
+              const stats = statSync(filePath)
+              const content = readFileSync(filePath, 'utf-8')
+              const frontmatter = parsePlanFrontmatter(content)
+
+              return {
+                filename,
+                path: filePath,
+                date: stats.mtime.toISOString(),
+                size: stats.size,
+                frontmatter,
+                content
+              }
+            } catch (e) {
+              console.error(`Failed to read plan file ${filename}:`, e)
+              return null
+            }
+          })
+          .filter((f): f is NonNullable<typeof f> => f !== null)
+
+        // Apply filters
+        let filtered = files
+
+        if (search) {
+          filtered = filtered.filter(f =>
+            f.content.toLowerCase().includes(search.toLowerCase()) ||
+            f.filename.toLowerCase().includes(search.toLowerCase())
+          )
+        }
+
+        if (startDate) {
+          const startTime = new Date(startDate).getTime()
+          filtered = filtered.filter(f => new Date(f.date).getTime() >= startTime)
+        }
+
+        if (endDate) {
+          const endTime = new Date(endDate).getTime()
+          filtered = filtered.filter(f => new Date(f.date).getTime() <= endTime)
+        }
+
+        // Apply sorting
+        if (sortBy === 'name') {
+          filtered.sort((a, b) => a.filename.localeCompare(b.filename))
+        } else if (sortBy === 'size') {
+          filtered.sort((a, b) => b.size - a.size)
+        } else {
+          // Default: sort by date (newest first)
+          filtered.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+        }
+
+        jsonResponse(res, { success: true, data: filtered })
+      } catch (e) {
+        console.error('Failed to fetch plans:', e)
+        jsonResponse(res, {
+          success: false,
+          error: e instanceof Error ? e.message : 'Failed to fetch plans'
+        }, 500)
+      }
+      return
+    }
+
+    // DELETE /api/plans/:filename - 刪除計劃檔案
+    if (path.startsWith('/api/plans/') && method === 'DELETE') {
+      try {
+        const filename = decodeURIComponent(path.split('/').pop() || '')
+
+        if (!filename.endsWith('.md')) {
+          jsonResponse(res, { success: false, error: 'Invalid filename' }, 400)
+          return
+        }
+
+        const plansDir = join(homedir(), '.claude', 'plans')
+        const filePath = join(plansDir, filename)
+
+        // Security: Ensure file is within plans directory
+        if (!filePath.startsWith(plansDir)) {
+          jsonResponse(res, { success: false, error: 'Invalid file path' }, 403)
+          return
+        }
+
+        if (existsSync(filePath)) {
+          unlinkSync(filePath)
+          jsonResponse(res, { success: true })
+        } else {
+          jsonResponse(res, { success: false, error: 'File not found' }, 404)
+        }
+      } catch (e) {
+        console.error('Failed to delete plan:', e)
+        jsonResponse(res, {
+          success: false,
+          error: e instanceof Error ? e.message : 'Failed to delete file'
+        }, 500)
+      }
+      return
+    }
+
     // 404
     jsonResponse(res, { success: false, error: 'Not found' }, 404)
 
   } catch (error) {
     console.error('API Error:', error)
-    jsonResponse(res, { 
-      success: false, 
-      error: error instanceof Error ? error.message : 'Internal server error' 
+    jsonResponse(res, {
+      success: false,
+      error: error instanceof Error ? error.message : 'Internal server error'
     }, 500)
   }
 }
@@ -2257,7 +2447,7 @@ server.listen(PORT, () => {
 ║  🕐 Timezone: Asia/Taipei                                  ║
 ╚════════════════════════════════════════════════════════════╝
   `)
-  
+
   initializeSchedules()
 })
 
