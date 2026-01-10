@@ -91,6 +91,42 @@ function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS idx_conversations_source ON conversations(source);
     CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_path);
     CREATE INDEX IF NOT EXISTS idx_sync_status_timestamp ON project_sync_status(last_sync_timestamp);
+
+    CREATE TABLE IF NOT EXISTS plans (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      filename TEXT NOT NULL,
+      title TEXT,
+      content TEXT NOT NULL,
+      frontmatter TEXT,
+      file_hash TEXT NOT NULL,
+      file_size INTEGER DEFAULT 0,
+      file_mtime TEXT,
+      source TEXT NOT NULL DEFAULT 'imported',
+      imported_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      import_status TEXT DEFAULT 'pending',
+      llm_analysis TEXT,
+      execution_log_id INTEGER,
+      UNIQUE(filename, file_hash),
+      FOREIGN KEY (execution_log_id) REFERENCES execution_logs(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_plans_filename ON plans(filename);
+    CREATE INDEX IF NOT EXISTS idx_plans_hash ON plans(file_hash);
+    CREATE INDEX IF NOT EXISTS idx_plans_status ON plans(import_status);
+    CREATE INDEX IF NOT EXISTS idx_plans_imported_at ON plans(imported_at);
+
+    CREATE TABLE IF NOT EXISTS plan_sync_status (
+      plan_directory TEXT PRIMARY KEY,
+      last_sync_timestamp TEXT NOT NULL,
+      last_synced_file TEXT,
+      total_plans_synced INTEGER DEFAULT 0,
+      total_plans_updated INTEGER DEFAULT 0,
+      last_sync_status TEXT DEFAULT 'success',
+      last_sync_error TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
   `)
 
   // Migrate schema: Add missing columns if they don't exist
@@ -196,6 +232,369 @@ function backfillPromptHashes() {
 
 // Run backfill migration on startup
 backfillPromptHashes()
+
+// ============ Plan Import Functions ============
+
+/**
+ * Generate SHA-256 hash of plan content for deduplication
+ */
+function generatePlanHash(content: string): string {
+  return createHash('sha256')
+    .update(content.trim())
+    .digest('hex')
+}
+
+/**
+ * Extract meaningful title from plan content
+ */
+function extractPlanTitle(content: string, frontmatter: Record<string, string>): string {
+  // Priority 1: Check frontmatter for title
+  if (frontmatter.title) {
+    return frontmatter.title
+  }
+
+  // Priority 2: Check frontmatter for goal
+  if (frontmatter.goal) {
+    return frontmatter.goal
+  }
+
+  // Priority 3: Extract first H1 heading
+  const lines = content.split('\n')
+  for (const line of lines) {
+    const match = line.match(/^#\s+(.+)/)
+    if (match) {
+      return match[1].trim()
+    }
+  }
+
+  // Fallback: Return untitled
+  return 'Untitled Plan'
+}
+
+/**
+ * Interface for plan files to be imported
+ */
+interface PlanFile {
+  filename: string
+  fullPath: string
+  content: string
+  hash: string
+  size: number
+  mtime: string
+  isNew: boolean
+  isUpdated: boolean
+}
+
+/**
+ * Check for new or updated plans in ~/.claude/plans directory
+ */
+async function checkForNewOrUpdatedPlans(): Promise<PlanFile[]> {
+  const plansDir = join(homedir(), '.claude', 'plans')
+
+  if (!existsSync(plansDir)) {
+    console.log('[PlanImport] Plans directory does not exist')
+    return []
+  }
+
+  const files = readdirSync(plansDir)
+    .filter(f => f.endsWith('.md'))
+
+  const result: PlanFile[] = []
+
+  for (const filename of files) {
+    const fullPath = join(plansDir, filename)
+    const stats = statSync(fullPath)
+    const content = readFileSync(fullPath, 'utf-8')
+    const hash = generatePlanHash(content)
+
+    // Check if plan exists in database
+    const existing = db.prepare(
+      'SELECT file_hash FROM plans WHERE filename = ? ORDER BY imported_at DESC LIMIT 1'
+    ).get(filename) as { file_hash: string } | undefined
+
+    let isNew = false
+    let isUpdated = false
+
+    if (!existing) {
+      isNew = true
+    } else if (existing.file_hash !== hash) {
+      isUpdated = true
+    }
+
+    if (isNew || isUpdated) {
+      result.push({
+        filename,
+        fullPath,
+        content,
+        hash,
+        size: stats.size,
+        mtime: stats.mtime.toISOString(),
+        isNew,
+        isUpdated
+      })
+    }
+  }
+
+  console.log(`[PlanImport] Found ${result.length} new/updated plans (${result.filter(p => p.isNew).length} new, ${result.filter(p => p.isUpdated).length} updated)`)
+
+  return result
+}
+
+/**
+ * Import and analyze a single plan file
+ */
+async function importAndAnalyzePlan(planFile: PlanFile, executionLogId: number): Promise<void> {
+  const { filename, content, hash, size, mtime } = planFile
+
+  try {
+    // Parse frontmatter
+    const frontmatter = parsePlanFrontmatter(content)
+    const title = extractPlanTitle(content, frontmatter)
+
+    // Insert plan with 'analyzing' status
+    const insertPlan = db.prepare(`
+      INSERT INTO plans (
+        filename, title, content, frontmatter, file_hash,
+        file_size, file_mtime, import_status, execution_log_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'analyzing', ?)
+    `)
+
+    const result = insertPlan.run(
+      filename,
+      title,
+      content,
+      JSON.stringify(frontmatter),
+      hash,
+      size,
+      mtime,
+      executionLogId
+    )
+
+    const planId = result.lastInsertRowid
+
+    console.log(`[PlanImport] Inserted plan: ${filename} (${title})`)
+
+    // Generate LLM analysis prompt
+    const analysisPrompt = `Please analyze this implementation plan and provide a concise summary:
+
+Title: ${title}
+Status: ${frontmatter.status || 'Unknown'}
+Goal: ${frontmatter.goal || 'Not specified'}
+
+Plan Content:
+${content.substring(0, 3000)}
+
+Provide a brief analysis covering:
+1. Main objectives
+2. Key implementation steps
+3. Potential challenges or risks
+4. Overall complexity assessment
+
+Keep the analysis under 300 words.`
+
+    // Run LLM analysis
+    const analysis = await runLLMCommand(analysisPrompt, {
+      maxTurns: 1,
+      outputFormat: 'text',
+      skipPermissions: true
+    })
+
+    console.log(`[PlanImport] LLM analysis completed for ${filename}`)
+
+    // Update plan with analysis
+    const updatePlan = db.prepare(`
+      UPDATE plans
+      SET llm_analysis = ?,
+          import_status = 'completed',
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `)
+    updatePlan.run(analysis, planId)
+
+  } catch (error) {
+    console.error(`[PlanImport] Failed to import ${filename}:`, error)
+
+    // Update plan status to failed
+    db.prepare(`
+      UPDATE plans
+      SET import_status = 'failed',
+          updated_at = CURRENT_TIMESTAMP
+      WHERE filename = ? AND file_hash = ?
+    `).run(filename, hash)
+
+    throw error
+  }
+}
+
+/**
+ * Execute scheduled task with plan import logic (triggered for 4AM schedules)
+ */
+async function executeScheduleWithPlanImport(
+  scheduleId: number,
+  scheduleName: string,
+  prompt: string,
+  hour: number
+): Promise<void> {
+  const startTime = Date.now()
+
+  // Check if this is the 4AM schedule
+  const shouldImportPlans = (hour === 4)
+
+  if (!shouldImportPlans) {
+    // Not 4AM, execute normal LLM command
+    await executeLLMCode(scheduleId, scheduleName, prompt)
+    return
+  }
+
+  // 4AM - Check for plans to import
+  console.log('[PlanImport] Starting plan import check at 4AM...')
+
+  // Create execution log entry
+  const insertLog = db.prepare(`
+    INSERT INTO execution_logs (schedule_id, schedule_name, status, response)
+    VALUES (?, ?, 'pending', '')
+  `)
+  const result = insertLog.run(scheduleId, scheduleName)
+  const logId = result.lastInsertRowid as number
+
+  try {
+    // Check for new or updated plans
+    const plansToImport = await checkForNewOrUpdatedPlans()
+
+    if (plansToImport.length === 0) {
+      // No new plans, execute normal "hi" command
+      console.log('[PlanImport] No new plans to import, executing normal "hi" command')
+
+      const response = await runLLMCommand(prompt, {
+        maxTurns: 1,
+        outputFormat: 'text',
+        skipPermissions: true
+      })
+
+      const durationMs = Date.now() - startTime
+      const tokenEstimate = estimateTokens(prompt, response)
+
+      db.prepare(`
+        UPDATE execution_logs
+        SET status = 'success',
+            input_tokens = ?,
+            output_tokens = ?,
+            total_tokens = ?,
+            cost_usd = ?,
+            duration_ms = ?,
+            response = ?
+        WHERE id = ?
+      `).run(
+        tokenEstimate.input,
+        tokenEstimate.output,
+        tokenEstimate.total,
+        tokenEstimate.cost,
+        durationMs,
+        response.substring(0, 10000),
+        logId
+      )
+
+      console.log(`[PlanImport] ✅ No imports, standard execution completed`)
+      return
+    }
+
+    // Import and analyze plans
+    console.log(`[PlanImport] Importing ${plansToImport.length} plans...`)
+
+    let successCount = 0
+    let failCount = 0
+
+    for (const planFile of plansToImport) {
+      try {
+        await importAndAnalyzePlan(planFile, logId)
+        successCount++
+      } catch (error) {
+        failCount++
+        console.error(`[PlanImport] Failed to import ${planFile.filename}:`, error)
+      }
+    }
+
+    const durationMs = Date.now() - startTime
+
+    // Estimate total tokens used
+    // Each plan analysis uses approximately 1000 input + 300 output tokens
+    const estimatedInputTokens = successCount * 1000
+    const estimatedOutputTokens = successCount * 300
+    const totalTokens = estimatedInputTokens + estimatedOutputTokens
+    const estimatedCost = (estimatedInputTokens * 3 + estimatedOutputTokens * 15) / 1000000
+
+    // Update execution log
+    const summaryResponse = `Imported ${successCount} plan(s) with LLM analysis. ${failCount} failed.`
+
+    db.prepare(`
+      UPDATE execution_logs
+      SET status = 'success',
+          input_tokens = ?,
+          output_tokens = ?,
+          total_tokens = ?,
+          cost_usd = ?,
+          duration_ms = ?,
+          response = ?
+      WHERE id = ?
+    `).run(
+      estimatedInputTokens,
+      estimatedOutputTokens,
+      totalTokens,
+      estimatedCost,
+      durationMs,
+      summaryResponse,
+      logId
+    )
+
+    // Update sync status
+    const plansDir = join(homedir(), '.claude', 'plans')
+    db.prepare(`
+      INSERT INTO plan_sync_status (
+        plan_directory, last_sync_timestamp, total_plans_synced,
+        total_plans_updated, last_sync_status
+      ) VALUES (?, datetime('now'), ?, ?, 'success')
+      ON CONFLICT(plan_directory) DO UPDATE SET
+        last_sync_timestamp = datetime('now'),
+        total_plans_synced = total_plans_synced + excluded.total_plans_synced,
+        total_plans_updated = total_plans_updated + excluded.total_plans_updated,
+        last_sync_status = 'success',
+        updated_at = CURRENT_TIMESTAMP
+    `).run(
+      plansDir,
+      plansToImport.filter(p => p.isNew).length,
+      plansToImport.filter(p => p.isUpdated).length
+    )
+
+    console.log(`[PlanImport] ✅ Imported ${successCount} plans | Tokens: ${totalTokens} | Cost: $${estimatedCost.toFixed(6)} | Duration: ${durationMs}ms`)
+
+  } catch (error) {
+    const durationMs = Date.now() - startTime
+    const errorMessage = error instanceof Error ? error.message : String(error)
+
+    db.prepare(`
+      UPDATE execution_logs
+      SET status = 'failed',
+          duration_ms = ?,
+          error = ?
+      WHERE id = ?
+    `).run(durationMs, errorMessage, logId)
+
+    // Update sync status with error
+    const plansDir = join(homedir(), '.claude', 'plans')
+    db.prepare(`
+      INSERT INTO plan_sync_status (
+        plan_directory, last_sync_timestamp, last_sync_status, last_sync_error
+      ) VALUES (?, datetime('now'), 'failed', ?)
+      ON CONFLICT(plan_directory) DO UPDATE SET
+        last_sync_timestamp = datetime('now'),
+        last_sync_status = 'failed',
+        last_sync_error = excluded.last_sync_error,
+        updated_at = CURRENT_TIMESTAMP
+    `).run(plansDir, errorMessage)
+
+    console.error(`[PlanImport] ❌ Import failed: ${errorMessage}`)
+  }
+}
 
 // ============ Scheduler Manager ============
 const scheduledTasks = new Map<number, ScheduledTask>()
@@ -760,7 +1159,13 @@ function setupSchedule(schedule: Schedule): void {
   if (!schedule.enabled) return
 
   const task = cron.schedule(schedule.cron_expression, () => {
-    executeLLMCode(schedule.id, schedule.name, schedule.prompt)
+    // Pass schedule hour for plan import logic (4AM only)
+    executeScheduleWithPlanImport(
+      schedule.id,
+      schedule.name,
+      schedule.prompt,
+      schedule.hour
+    )
   }, {
     timezone: 'Asia/Taipei'
   })
@@ -2298,6 +2703,48 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         jsonResponse(res, {
           success: false,
           error: error instanceof Error ? error.message : 'Failed to select history path'
+        }, 500)
+      }
+      return
+    }
+
+    // GET /api/plans/imported - Get imported plans from database
+    if (path === '/api/plans/imported' && method === 'GET') {
+      try {
+        const plans = db.prepare(`
+          SELECT
+            id, filename, title, frontmatter, file_hash, file_size,
+            import_status, imported_at, updated_at, llm_analysis
+          FROM plans
+          ORDER BY imported_at DESC
+        `).all()
+
+        jsonResponse(res, { success: true, data: plans })
+      } catch (e) {
+        console.error('Failed to fetch imported plans:', e)
+        jsonResponse(res, {
+          success: false,
+          error: e instanceof Error ? e.message : 'Failed to fetch imported plans'
+        }, 500)
+      }
+      return
+    }
+
+    // GET /api/plans/sync-status - Get plan sync status
+    if (path === '/api/plans/sync-status' && method === 'GET') {
+      try {
+        const status = db.prepare(`
+          SELECT * FROM plan_sync_status
+          ORDER BY last_sync_timestamp DESC
+          LIMIT 1
+        `).get()
+
+        jsonResponse(res, { success: true, data: status || null })
+      } catch (e) {
+        console.error('Failed to fetch sync status:', e)
+        jsonResponse(res, {
+          success: false,
+          error: e instanceof Error ? e.message : 'Failed to fetch sync status'
         }, 500)
       }
       return
