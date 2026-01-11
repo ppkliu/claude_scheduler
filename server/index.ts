@@ -8,6 +8,14 @@ import { createInterface } from 'readline'
 import { homedir } from 'os'
 import { createHash } from 'crypto'
 
+// Deployment system imports
+import { websocketService } from './services/websocket.service'
+import { initializeBuildService, getBuildService } from './services/build.service'
+import { initializeFileWatcher, getFileWatcher } from './services/file-watcher.service'
+import { initializeSystemMonitor, getSystemMonitor } from './services/system-monitor.service'
+import { initializeGitTracker, getGitTracker } from './services/git-tracker.service'
+import { initializeDependencyService, getDependencyService } from './services/dependency.service'
+
 // ============ Database Setup ============
 const dbPath = resolve(process.cwd(), 'scheduler.db')
 const db = new Database(dbPath)
@@ -127,6 +135,90 @@ function initializeDatabase() {
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS build_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      trigger_type TEXT NOT NULL CHECK(trigger_type IN ('file_change', 'dependency_update', 'manual', 'scheduled')),
+      trigger_source TEXT,
+      started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      completed_at TEXT,
+      status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'building', 'success', 'failed')),
+      build_output TEXT,
+      exit_code INTEGER,
+      duration_ms INTEGER,
+      changed_files TEXT,
+      error_message TEXT,
+      environment TEXT DEFAULT 'development'
+    );
+
+    CREATE TABLE IF NOT EXISTS dependency_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      snapshot_name TEXT NOT NULL,
+      package_json TEXT NOT NULL,
+      package_lock_json TEXT NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      created_by TEXT DEFAULT 'system',
+      is_stable INTEGER DEFAULT 0,
+      notes TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS dependency_status (
+      package_name TEXT PRIMARY KEY,
+      current_version TEXT NOT NULL,
+      latest_version TEXT,
+      wanted_version TEXT,
+      update_type TEXT CHECK(update_type IN ('major', 'minor', 'patch', 'none')),
+      is_dev_dependency INTEGER DEFAULT 0,
+      has_security_issues INTEGER DEFAULT 0,
+      security_vulnerabilities TEXT,
+      last_checked_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      last_updated_at TEXT,
+      homepage TEXT,
+      description TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS system_metrics (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+      cpu_usage_percent REAL,
+      memory_total_mb INTEGER,
+      memory_used_mb INTEGER,
+      memory_free_mb INTEGER,
+      disk_total_gb INTEGER,
+      disk_used_gb INTEGER,
+      disk_free_gb INTEGER,
+      uptime_seconds INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS git_status_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+      branch TEXT NOT NULL,
+      latest_commit_hash TEXT NOT NULL,
+      latest_commit_message TEXT,
+      latest_commit_author TEXT,
+      latest_commit_date TEXT,
+      uncommitted_changes_count INTEGER DEFAULT 0,
+      uncommitted_files TEXT,
+      remote_status TEXT CHECK(remote_status IN ('up-to-date', 'ahead', 'behind', 'diverged', 'unknown')),
+      commits_ahead INTEGER DEFAULT 0,
+      commits_behind INTEGER DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS deployment_config (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      description TEXT,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_build_status ON build_history(status);
+    CREATE INDEX IF NOT EXISTS idx_build_started ON build_history(started_at);
+    CREATE INDEX IF NOT EXISTS idx_build_trigger ON build_history(trigger_type);
+    CREATE INDEX IF NOT EXISTS idx_dependency_update_type ON dependency_status(update_type);
+    CREATE INDEX IF NOT EXISTS idx_dependency_security ON dependency_status(has_security_issues);
+    CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON system_metrics(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_git_timestamp ON git_status_snapshots(timestamp);
   `)
 
   // Migrate schema: Add missing columns if they don't exist
@@ -2867,6 +2959,103 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       return
     }
 
+    // ============ Deployment System API Routes ============
+
+    // GET /api/deployment/builds - 獲取構建歷史
+    if (path === '/api/deployment/builds' && method === 'GET') {
+      const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 100)
+      const offset = parseInt(url.searchParams.get('offset') || '0')
+      const builds = getBuildService().getBuildHistory(limit, offset)
+      const total = (db.prepare('SELECT COUNT(*) as count FROM build_history').get() as any).count
+      jsonResponse(res, { success: true, data: { builds, total, hasMore: offset + limit < total } })
+      return
+    }
+
+    // GET /api/deployment/builds/:id - 獲取特定構建
+    if (path.match(/^\/api\/deployment\/builds\/\d+$/) && method === 'GET') {
+      const id = parseInt(path.split('/').pop()!)
+      const build = getBuildService().getBuildById(id)
+      jsonResponse(res, build ? { success: true, data: build } : { success: false, error: 'Build not found' }, build ? 200 : 404)
+      return
+    }
+
+    // POST /api/deployment/builds/trigger - 手動觸發構建
+    if (path === '/api/deployment/builds/trigger' && method === 'POST') {
+      const body = await parseBody(req)
+      getBuildService().executeBuild({
+        triggerType: 'manual',
+        triggerSource: body.reason || 'Manual trigger from UI',
+        environment: body.environment || 'development'
+      })
+      jsonResponse(res, { success: true, message: 'Build triggered' }, 201)
+      return
+    }
+
+    // GET /api/monitor/metrics/current - 獲取當前系統指標
+    if (path === '/api/monitor/metrics/current' && method === 'GET') {
+      const stmt = db.prepare('SELECT * FROM system_metrics ORDER BY timestamp DESC LIMIT 1')
+      const metrics = stmt.get()
+      jsonResponse(res, { success: true, data: metrics || {} })
+      return
+    }
+
+    // GET /api/monitor/metrics/history - 獲取指標歷史
+    if (path === '/api/monitor/metrics/history' && method === 'GET') {
+      const range = url.searchParams.get('range') || '24h'
+      const hours = range === '1h' ? 1 : range === '6h' ? 6 : range === '7d' ? 168 : 24
+      const history = getSystemMonitor().getMetricsHistory(hours)
+      jsonResponse(res, { success: true, data: history })
+      return
+    }
+
+    // GET /api/monitor/git/status - 獲取 Git 狀態
+    if (path === '/api/monitor/git/status' && method === 'GET') {
+      const stmt = db.prepare('SELECT * FROM git_status_snapshots ORDER BY timestamp DESC LIMIT 1')
+      const status = stmt.get()
+      jsonResponse(res, { success: true, data: status || {} })
+      return
+    }
+
+    // GET /api/dependencies/status - 獲取依賴狀態
+    if (path === '/api/dependencies/status' && method === 'GET') {
+      getDependencyService().checkUpdates().then(deps => {
+        const summary = deps.reduce((acc, dep) => {
+          acc.total++
+          if (dep.update_type === 'major') acc.major++
+          if (dep.update_type === 'minor') acc.minor++
+          if (dep.update_type === 'patch') acc.patch++
+          if (dep.has_security_issues) acc.security++
+          return acc
+        }, { total: 0, major: 0, minor: 0, patch: 0, security: 0 })
+
+        jsonResponse(res, {
+          success: true,
+          data: { dependencies: deps, lastChecked: new Date().toISOString(), updatesSummary: summary }
+        })
+      }).catch(error => {
+        jsonResponse(res, { success: false, error: String(error) }, 500)
+      })
+      return
+    }
+
+    // GET /api/deployment/config - 獲取部署配置
+    if (path === '/api/deployment/config' && method === 'GET') {
+      jsonResponse(res, {
+        success: true,
+        data: {
+          fileWatchEnabled: process.env.FILE_WATCH_ENABLED !== 'false',
+          fileWatchMode: process.env.FILE_WATCH_MODE || 'internal',
+          debounceMs: parseInt(process.env.FILE_WATCH_DEBOUNCE_MS || '2000'),
+          watchPaths: (process.env.WATCH_PATHS || 'src,server').split(','),
+          monitorEnabled: process.env.ENABLE_MONITOR !== 'false',
+          metricsInterval: parseInt(process.env.METRICS_INTERVAL_MS || '30000'),
+          gitTrackingInterval: parseInt(process.env.GIT_TRACKING_INTERVAL_MS || '60000'),
+          dependencyCheckSchedule: process.env.DEPENDENCY_CHECK_CRON || '0 9 * * *'
+        }
+      })
+      return
+    }
+
     // 404
     jsonResponse(res, { success: false, error: 'Not found' }, 404)
 
@@ -2884,6 +3073,9 @@ const PORT = process.env.PORT || 3001
 
 const server = createServer(handleRequest)
 
+// Initialize WebSocket
+websocketService.initialize(server)
+
 server.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════════════════════════╗
@@ -2896,6 +3088,39 @@ server.listen(PORT, () => {
   `)
 
   initializeSchedules()
+
+  // Initialize deployment system services
+  console.log('[Init] Initializing deployment system services...')
+  try {
+    // Initialize services
+    initializeBuildService(db)
+    initializeSystemMonitor(db).start()
+    initializeGitTracker(db).start()
+    initializeDependencyService(db)
+
+    // Start file watcher if enabled
+    const fileWatcher = initializeFileWatcher()
+    if (process.env.FILE_WATCH_ENABLED !== 'false') {
+      fileWatcher.start()
+    }
+
+    console.log('[Init] Deployment system services initialized')
+
+    // Setup cleanup cron jobs
+    const buildRetentionDays = parseInt(process.env.BUILD_RETENTION_DAYS || '7')
+    const metricsRetentionDays = parseInt(process.env.METRICS_RETENTION_DAYS || '3')
+
+    // Daily cleanup at 2 AM
+    cron.schedule('0 2 * * *', () => {
+      console.log('[Cleanup] Starting cleanup tasks...')
+      getBuildService().cleanupOldBuilds(buildRetentionDays)
+      getSystemMonitor().cleanupOldMetrics(metricsRetentionDays)
+    })
+
+    console.log('[Init] Cleanup tasks scheduled')
+  } catch (error) {
+    console.error('[Init] Error initializing deployment system:', error)
+  }
 })
 
 // Graceful shutdown
