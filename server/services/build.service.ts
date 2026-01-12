@@ -103,8 +103,8 @@ export class BuildService {
    */
   private async runBuildCommand(buildId: number, options: BuildOptions): Promise<BuildResult> {
     const startTime = Date.now()
+    const startedAt = new Date().toISOString()
     let output = ''
-    let exitCode = 0
 
     return new Promise((resolve) => {
       // Use npx to ensure local package version
@@ -129,13 +129,13 @@ export class BuildService {
       })
         .then((result) => {
           const duration = Date.now() - startTime
-          exitCode = result.exitCode
 
           resolve({
             success: result.success,
             exitCode: result.exitCode,
             output: result.output,
-            duration
+            duration,
+            startedAt
           })
         })
         .catch((error) => {
@@ -148,7 +148,8 @@ export class BuildService {
             success: false,
             exitCode: 1,
             output: output + '\n' + errorMsg,
-            duration
+            duration,
+            startedAt
           })
         })
     })
@@ -251,7 +252,7 @@ export class BuildService {
       return false
     }
 
-    if (build.status === 'completed' || build.status === 'success' || build.status === 'failed') {
+    if (build.status === 'success' || build.status === 'failed') {
       console.warn(`[Build] Cannot cancel completed build ${id}`)
       return false
     }

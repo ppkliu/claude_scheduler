@@ -61,7 +61,7 @@ export class DependencyService {
    */
   private async getNcuUpdates(): Promise<DependencyStatus[]> {
     try {
-      const result = await executeNpm(['list', '--depth=0', '--json'], undefined, {
+      await executeNpm(['list', '--depth=0', '--json'], undefined, {
         timeout: 30000
       })
 

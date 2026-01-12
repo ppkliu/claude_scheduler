@@ -55,10 +55,10 @@ export class SystemMonitorService {
 
     try {
       const [cpu, mem, disk, time] = await Promise.all([
-        si.currentLoad().catch(() => ({ currentLoad: 0 })),
-        si.mem().catch(() => ({ total: 0, used: 0, free: 0 })),
-        si.fsSize().catch(() => [{ size: 0, used: 0 }]),
-        si.time().catch(() => ({ uptime: 0 }))
+        Promise.resolve(si.currentLoad()).catch(() => ({ currentLoad: 0 })) as Promise<any>,
+        Promise.resolve(si.mem()).catch(() => ({ total: 0, used: 0, free: 0 })) as Promise<any>,
+        Promise.resolve(si.fsSize()).catch(() => [{ size: 0, used: 0 }]) as Promise<any>,
+        Promise.resolve(si.time()).catch(() => ({ uptime: 0 })) as Promise<any>
       ])
 
       const metrics: SystemMetrics = {
