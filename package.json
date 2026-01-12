@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:docker": "concurrently \"npm run server\" \"vite --host 0.0.0.0\"",
     "build": "vue-tsc && vite build",
     "preview": "vite preview",
     "server": "tsx watch server/index.ts"
@@ -40,6 +41,7 @@
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-vue": "^5.0.4",
     "autoprefixer": "^10.4.19",
+    "concurrently": "^9.2.1",
     "postcss": "^8.4.38",
     "tailwindcss": "^3.4.3",
     "tsx": "^4.7.2",
