@@ -11,9 +11,9 @@ import { createHash } from 'crypto'
 // Deployment system imports
 import { websocketService } from './services/websocket.service'
 import { initializeBuildService, getBuildService } from './services/build.service'
-import { initializeFileWatcher, getFileWatcher } from './services/file-watcher.service'
+import { initializeFileWatcher } from './services/file-watcher.service'
 import { initializeSystemMonitor, getSystemMonitor } from './services/system-monitor.service'
-import { initializeGitTracker, getGitTracker } from './services/git-tracker.service'
+import { initializeGitTracker } from './services/git-tracker.service'
 import { initializeDependencyService, getDependencyService } from './services/dependency.service'
 
 // ============ Database Setup ============
@@ -2981,11 +2981,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
     // POST /api/deployment/builds/trigger - 手動觸發構建
     if (path === '/api/deployment/builds/trigger' && method === 'POST') {
-      const body = await parseBody(req)
+      const body = await parseBody(req) as any
+      const env = body?.environment as string | undefined
       getBuildService().executeBuild({
         triggerType: 'manual',
-        triggerSource: body.reason || 'Manual trigger from UI',
-        environment: body.environment || 'development'
+        triggerSource: (body?.reason as string | undefined) || 'Manual trigger from UI',
+        environment: (env === 'production' || env === 'development' ? env : 'development') as 'development' | 'production'
       })
       jsonResponse(res, { success: true, message: 'Build triggered' }, 201)
       return

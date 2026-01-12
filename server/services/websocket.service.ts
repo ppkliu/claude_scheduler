@@ -4,7 +4,6 @@
  */
 
 import { WebSocketServer, WebSocket } from 'ws'
-import { IncomingMessage } from 'http'
 import type { WebSocketMessage, BuildLogUpdate, MetricsUpdate } from '../types/deployment.types'
 
 interface ClientMetadata {
@@ -28,7 +27,7 @@ export class WebSocketService {
       path: '/ws/deployment'
     })
 
-    this.wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
+    this.wss.on('connection', (ws: WebSocket) => {
       const clientId = `client-${++this.clientIdCounter}`
       const metadata: ClientMetadata = {
         id: clientId,
@@ -91,7 +90,7 @@ export class WebSocketService {
    * Handle incoming WebSocket messages
    */
   private handleMessage(ws: WebSocket, message: any, metadata: ClientMetadata): void {
-    const { event, data } = message
+    const { event } = message
 
     switch (event) {
       case 'ping':

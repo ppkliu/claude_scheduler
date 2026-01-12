@@ -7,9 +7,10 @@ import chokidar from 'chokidar'
 import { debounce } from '../utils/debounce'
 import { getBuildService } from './build.service'
 import type { BuildOptions } from '../types/deployment.types'
+import type { FSWatcher } from 'chokidar'
 
 export class FileWatcherService {
-  private watcher: chokidar.FSWatcher | null = null
+  private watcher: FSWatcher | null = null
   private isWatching = false
   private changedFiles: Set<string> = new Set()
   private debounceMs = 2000
@@ -97,7 +98,7 @@ export class FileWatcherService {
         this.changedFiles.add(path)
         debouncedBuild()
       })
-      .on('error', (error: Error) => {
+      .on('error', (error: unknown) => {
         console.error('[FileWatcher] Error:', error)
       })
 

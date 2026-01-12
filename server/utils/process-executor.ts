@@ -4,7 +4,6 @@
  */
 
 import { spawn, spawnSync, SpawnOptions } from 'child_process'
-import { promisify } from 'util'
 
 export interface ExecutionResult {
   exitCode: number
@@ -112,9 +111,9 @@ export function executeCommandSync(
   try {
     const result = spawnSync(command, args, {
       cwd: process.cwd(),
-      encoding: 'utf-8',
+      encoding: 'utf-8' as const,
       ...options
-    })
+    } as any)
 
     const duration = Date.now() - startTime
 

@@ -36,6 +36,23 @@ services:
       # Logging
       LOG_LEVEL: debug
 
+      # Deployment System Configuration
+      # File Watcher (Auto-rebuild on code changes)
+      FILE_WATCH_ENABLED: "true"
+      FILE_WATCH_MODE: "internal"
+      FILE_WATCH_DEBOUNCE_MS: "2000"
+      WATCH_PATHS: "src,server,package.json,vite.config.ts"
+
+      # Monitoring Panel
+      ENABLE_MONITOR: "true"
+      METRICS_INTERVAL_MS: "30000"
+      GIT_TRACKING_INTERVAL_MS: "60000"
+      DEPENDENCY_CHECK_CRON: "0 9 * * *"
+
+      # Data Retention Policies
+      BUILD_RETENTION_DAYS: "7"
+      METRICS_RETENTION_DAYS: "3"
+
     # Override the default command for development
     command: npm run dev
 
