@@ -18,6 +18,8 @@ services:
       - ./data:/app/data
       # Volume for logs
       - ./logs:/app/logs
+      # Read-only mount for plans directory
+      - ${HOME}/.claude/plans:/data/plans:ro
       # Optional: SSL certificates
       # - ./certs:/app/certs:ro
     environment:
@@ -39,6 +41,9 @@ services:
 
       # Security
       # ALLOWED_ORIGINS: https://yourdomain.com
+
+      # Plans directory (mounted from host)
+      PLANS_DIR: /data/plans
 
       # Deployment System Configuration (Production defaults)
       # File Watcher (disabled in production)
