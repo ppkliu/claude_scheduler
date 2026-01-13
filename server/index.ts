@@ -381,7 +381,7 @@ interface PlanFile {
  * Check for new or updated plans in ~/.claude/plans directory
  */
 async function checkForNewOrUpdatedPlans(): Promise<PlanFile[]> {
-  const plansDir = join(homedir(), '.claude', 'plans')
+  const plansDir = process.env.PLANS_DIR || join(homedir(), '.claude', 'plans')
 
   if (!existsSync(plansDir)) {
     console.log('[PlanImport] Plans directory does not exist')
@@ -639,7 +639,7 @@ async function executeScheduleWithPlanImport(
     )
 
     // Update sync status
-    const plansDir = join(homedir(), '.claude', 'plans')
+    const plansDir = process.env.PLANS_DIR || join(homedir(), '.claude', 'plans')
     db.prepare(`
       INSERT INTO plan_sync_status (
         plan_directory, last_sync_timestamp, total_plans_synced,
@@ -672,7 +672,7 @@ async function executeScheduleWithPlanImport(
     `).run(durationMs, errorMessage, logId)
 
     // Update sync status with error
-    const plansDir = join(homedir(), '.claude', 'plans')
+    const plansDir = process.env.PLANS_DIR || join(homedir(), '.claude', 'plans')
     db.prepare(`
       INSERT INTO plan_sync_status (
         plan_directory, last_sync_timestamp, last_sync_status, last_sync_error
@@ -2850,7 +2850,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         const endDate = url.searchParams.get('endDate') || ''
         const sortBy = url.searchParams.get('sortBy') || 'date'
 
-        const plansDir = join(homedir(), '.claude', 'plans')
+        const plansDir = process.env.PLANS_DIR || join(homedir(), '.claude', 'plans')
 
         // Check if plans directory exists
         if (!existsSync(plansDir)) {
@@ -2934,7 +2934,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           return
         }
 
-        const plansDir = join(homedir(), '.claude', 'plans')
+        const plansDir = process.env.PLANS_DIR || join(homedir(), '.claude', 'plans')
         const filePath = join(plansDir, filename)
 
         // Security: Ensure file is within plans directory

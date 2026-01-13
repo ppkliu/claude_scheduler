@@ -18,6 +18,8 @@ services:
       - /app/node_modules
       # Volume for database persistence (optional)
       - ./scheduler.db:/app/scheduler.db
+      # Read-only mount for plans directory
+      - ${HOME}/.claude/plans:/data/plans:ro
     environment:
       # Development environment
       NODE_ENV: development
@@ -36,6 +38,9 @@ services:
 
       # Logging
       LOG_LEVEL: debug
+
+      # Plans directory (mounted from host)
+      PLANS_DIR: /data/plans
 
       # Deployment System Configuration
       # File Watcher (Auto-rebuild on code changes)
