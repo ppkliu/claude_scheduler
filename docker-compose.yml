@@ -20,6 +20,15 @@ services:
       - ./scheduler.db:/app/scheduler.db
       # Read-only mount for plans directory
       - ${HOME}/.claude/plans:/data/plans:ro
+
+      # Claude CLI Binary (read-only)
+      - ${HOME}/.local/share/claude/versions/2.1.12:/usr/local/bin/claude:ro
+
+      # Complete .claude directory (read-write)
+      - ${HOME}/.claude:/home/nodejs/.claude:rw
+
+      # Claude plugins directory (read-only)
+      - ${HOME}/.local/share/claude:/home/nodejs/.local/share/claude:ro
     environment:
       # Development environment
       NODE_ENV: development
@@ -41,6 +50,12 @@ services:
 
       # Plans directory (mounted from host)
       PLANS_DIR: /data/plans
+
+      # Claude CLI Configuration (for Docker volume mounting)
+      CLAUDE_CLI_PATH: /usr/local/bin/claude
+      CLAUDE_HOME: /home/nodejs/.claude
+      USER_ID: "${USER_ID:-1001}"
+      GROUP_ID: "${GROUP_ID:-1001}"
 
       # Deployment System Configuration
       # File Watcher (Auto-rebuild on code changes)
