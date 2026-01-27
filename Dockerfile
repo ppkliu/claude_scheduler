@@ -8,11 +8,22 @@ FROM node:20-alpine AS development
 
 WORKDIR /app
 
-# Install necessary tools
+# Install necessary tools and Claude CLI compatibility libraries
 RUN apk add --no-cache \
     python3 \
     make \
-    g++
+    g++ \
+    libc6-compat \
+    libgcc \
+    libstdc++
+
+# Create nodejs user and setup Claude directories
+ARG USER_ID=1001
+ARG GROUP_ID=1001
+RUN addgroup -g ${GROUP_ID} -S nodejs && \
+    adduser -S nodejs -u ${USER_ID} -G nodejs && \
+    mkdir -p /home/nodejs/.claude /home/nodejs/.local/share/claude && \
+    chown -R nodejs:nodejs /home/nodejs
 
 # Copy package files
 COPY package*.json ./
