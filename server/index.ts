@@ -16,6 +16,28 @@ import { initializeSystemMonitor, getSystemMonitor } from './services/system-mon
 import { initializeGitTracker } from './services/git-tracker.service'
 import { initializeDependencyService, getDependencyService } from './services/dependency.service'
 
+// ============ Environment Configuration ============
+// Claude CLI paths and environment setup
+const CLAUDE_CLI_PATH = process.env.CLAUDE_CLI_PATH || '/home/image/.local/bin/claude'
+const CLAUDE_HOME = process.env.CLAUDE_HOME || join(homedir(), '.claude')
+
+// Helper function: Build Claude environment variables
+function buildClaudeEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    HOME: CLAUDE_HOME.replace('/.claude', ''),  // Set HOME to /home/nodejs
+    CLAUDE_HOME: CLAUDE_HOME,
+  }
+}
+
+// Helper function: Construct Claude path
+function getClaudePath(relativePath: string): string {
+  return join(CLAUDE_HOME, relativePath)
+}
+
+console.log('[ClaudeConfig] CLI Path:', CLAUDE_CLI_PATH)
+console.log('[ClaudeConfig] Home:', CLAUDE_HOME)
+
 // ============ Database Setup ============
 const dbPath = resolve(process.cwd(), 'scheduler.db')
 const db = new Database(dbPath)
@@ -112,7 +134,7 @@ function initializeDatabase() {
       source TEXT NOT NULL DEFAULT 'imported',
       imported_at TEXT DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-      import_status TEXT DEFAULT 'pending',
+      import_status TEXT DEFAULT 'pending',  -- 'pending', 'analyzing', 'completed', 'failed', 'imported_no_cli'
       llm_analysis TEXT,
       execution_log_id INTEGER,
       UNIQUE(filename, file_hash),
@@ -224,7 +246,7 @@ function initializeDatabase() {
   // Migrate schema: Add missing columns if they don't exist
   try {
     // Check if prompt_hash column exists in conversations table
-    const tableInfo = db.prepare("PRAGMA table_info(conversations)").all() as Array<{name: string}>
+    const tableInfo = db.prepare("PRAGMA table_info(conversations)").all() as Array<{ name: string }>
     const hasPromptHash = tableInfo.some(col => col.name === 'prompt_hash')
 
     if (!hasPromptHash) {
@@ -233,7 +255,7 @@ function initializeDatabase() {
     }
 
     // Check if unique constraint exists in table definition
-    const tableSchema = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='conversations'").get() as {sql: string} | undefined
+    const tableSchema = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='conversations'").get() as { sql: string } | undefined
     const hasUniqueConstraint = tableSchema?.sql?.includes('UNIQUE')
 
     if (!hasUniqueConstraint) {
@@ -337,9 +359,87 @@ function generatePlanHash(content: string): string {
 }
 
 /**
+ * Check if Claude CLI is available in the system PATH
+ * Caches the result to avoid repeated checks
+ */
+let claudeCLIAvailable: boolean | null = null
+let claudeCLICheckPromise: Promise<boolean> | null = null
+
+async function checkClaudeCLIAvailable(): Promise<boolean> {
+  if (claudeCLIAvailable !== null) {
+    return claudeCLIAvailable
+  }
+
+  // If check is already in progress, return the existing promise
+  if (claudeCLICheckPromise) {
+    return claudeCLICheckPromise
+  }
+
+  claudeCLICheckPromise = new Promise((resolve) => {
+    // Check if binary file exists
+    if (!existsSync(CLAUDE_CLI_PATH)) {
+      console.log('[ClaudeCLI] ⚠️  Binary not found at:', CLAUDE_CLI_PATH)
+      claudeCLIAvailable = false
+      claudeCLICheckPromise = null
+      resolve(false)
+      return
+    }
+
+    // Check if credentials exist
+    const credentialsPath = getClaudePath('.credentials.json')
+    if (!existsSync(credentialsPath)) {
+      console.log('[ClaudeCLI] ⚠️  Credentials not found at:', credentialsPath)
+      console.log('[ClaudeCLI] Run: claude login')
+      claudeCLIAvailable = false
+      claudeCLICheckPromise = null
+      resolve(false)
+      return
+    }
+
+    // Verify binary is executable
+    const check = spawn(CLAUDE_CLI_PATH, ['--version'], {
+      stdio: 'pipe',
+      env: buildClaudeEnv()
+    })
+
+    check.on('close', (code) => {
+      claudeCLIAvailable = code === 0
+      if (claudeCLIAvailable) {
+        console.log('[ClaudeCLI] ✅ Claude CLI available')
+        console.log('[ClaudeCLI] Binary:', CLAUDE_CLI_PATH)
+        console.log('[ClaudeCLI] Home:', CLAUDE_HOME)
+      } else {
+        console.log('[ClaudeCLI] ⚠️  Binary check failed with code:', code)
+        console.log('[ClaudeCLI] Plan analysis will be skipped')
+      }
+      claudeCLICheckPromise = null
+      resolve(claudeCLIAvailable)
+    })
+
+    check.on('error', (err) => {
+      console.error('[ClaudeCLI] Error checking CLI:', err.message)
+      claudeCLIAvailable = false
+      claudeCLICheckPromise = null
+      resolve(false)
+    })
+
+    // Timeout after 5 seconds
+    setTimeout(() => {
+      if (claudeCLICheckPromise) {
+        claudeCLIAvailable = false
+        claudeCLICheckPromise = null
+        resolve(false)
+      }
+    }, 5000)
+  })
+
+  return claudeCLICheckPromise
+}
+
+/**
  * Extract meaningful title from plan content
  */
-function extractPlanTitle(content: string, frontmatter: Record<string, string>): string {
+function extractPlanTitle(content: string, frontmatter: Record<string, string>, filename?: string): string {
   // Priority 1: Check frontmatter for title
   if (frontmatter.title) {
     return frontmatter.title
@@ -357,6 +457,11 @@ function extractPlanTitle(content: string, frontmatter: Record<string, string>):
     if (match) {
       return match[1].trim()
     }
+  }
+
+  // Priority 4: Use filename (without .md extension) if provided
+  if (filename) {
+    return filename.replace(/\.md$/, '')
   }
 
   // Fallback: Return untitled
@@ -437,11 +542,12 @@ async function checkForNewOrUpdatedPlans(): Promise<PlanFile[]> {
  */
 async function importAndAnalyzePlan(planFile: PlanFile, executionLogId: number): Promise<void> {
   const { filename, content, hash, size, mtime } = planFile
+  let planId: number | null = null
 
   try {
     // Parse frontmatter
     const frontmatter = parsePlanFrontmatter(content)
-    const title = extractPlanTitle(content, frontmatter)
+    const title = extractPlanTitle(content, frontmatter, filename)
 
     // Insert plan with 'analyzing' status
     const insertPlan = db.prepare(`
@@ -451,7 +557,7 @@ async function importAndAnalyzePlan(planFile: PlanFile, executionLogId: number):
       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'analyzing', ?)
     `)
 
-    const result = insertPlan.run(
+    const insertResult = insertPlan.run(
       filename,
       title,
       content,
@@ -462,7 +568,7 @@ async function importAndAnalyzePlan(planFile: PlanFile, executionLogId: number):
       executionLogId
     )
 
-    const planId = result.lastInsertRowid
+    planId = insertResult.lastInsertRowid as number
 
     console.log(`[PlanImport] Inserted plan: ${filename} (${title})`)
 
@@ -485,11 +591,26 @@ Provide a brief analysis covering:
 Keep the analysis under 300 words.`
 
     // Run LLM analysis
-    const analysis = await runLLMCommand(analysisPrompt, {
+    const result = await runLLMCommand(analysisPrompt, {
       maxTurns: 1,
       outputFormat: 'text',
       skipPermissions: true
     })
+
+    // Handle skipped analysis (Claude CLI not available)
+    if (result.skipped) {
+      console.log(`[PlanImport] ⚠️  Skipped analysis for ${filename}: ${result.skipReason}`)
+
+      const updatePlan = db.prepare(`
+        UPDATE plans
+        SET import_status = 'imported_no_cli',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `)
+      updatePlan.run(planId)
+
+      return
+    }
 
     console.log(`[PlanImport] LLM analysis completed for ${filename}`)
 
@@ -501,20 +622,45 @@ Keep the analysis under 300 words.`
           updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `)
-    updatePlan.run(analysis, planId)
+    updatePlan.run(result.output, planId)
 
   } catch (error) {
-    console.error(`[PlanImport] Failed to import ${filename}:`, error)
+    const errorMsg = error instanceof Error ? error.message : String(error)
 
-    // Update plan status to failed
-    db.prepare(`
-      UPDATE plans
-      SET import_status = 'failed',
-          updated_at = CURRENT_TIMESTAMP
-      WHERE filename = ? AND file_hash = ?
-    `).run(filename, hash)
+    // Differentiate between CLI errors and other errors
+    if (errorMsg.includes('ENOENT') || errorMsg.includes('spawn claude')) {
+      console.error(`[PlanImport] ❌ Claude CLI not found - skipping analysis for ${filename}`)
+      if (planId) {
+        db.prepare(`
+          UPDATE plans
+          SET import_status = 'imported_no_cli',
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(planId)
+      }
+    } else {
+      console.error(`[PlanImport] ❌ Failed to analyze plan ${filename}:`, errorMsg)
 
-    throw error
+      // Update plan status to failed if it was inserted
+      if (planId) {
+        db.prepare(`
+          UPDATE plans
+          SET import_status = 'failed',
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(planId)
+      } else {
+        // Plan wasn't inserted yet, try by filename/hash
+        db.prepare(`
+          UPDATE plans
+          SET import_status = 'failed',
+              updated_at = CURRENT_TIMESTAMP
+          WHERE filename = ? AND file_hash = ?
+        `).run(filename, hash)
+      }
+
+      throw error
+    }
   }
 }
 
@@ -557,13 +703,14 @@ async function executeScheduleWithPlanImport(
       // No new plans, execute normal "hi" command
       console.log('[PlanImport] No new plans to import, executing normal "hi" command')
 
-      const response = await runLLMCommand(prompt, {
+      const result = await runLLMCommand(prompt, {
         maxTurns: 1,
         outputFormat: 'text',
         skipPermissions: true
       })
 
       const durationMs = Date.now() - startTime
+      const response = result.output
       const tokenEstimate = estimateTokens(prompt, response)
 
       db.prepare(`
@@ -743,6 +890,15 @@ interface ConversationGroup {
 // 最省 token 的 prompt - 只說 "hi"
 const MINIMAL_PROMPT = 'hi'
 
+// LLM Command execution result
+interface LLMCommandResult {
+  output: string
+  error?: string
+  executionTime: number
+  skipped?: boolean  // Indicates CLI was not available
+  skipReason?: string // Reason for skipping
+}
+
 // LLM Code CLI 執行選項
 interface LLMCodeOptions {
   permissionMode?: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions'
@@ -764,12 +920,13 @@ async function executeLLMCode(scheduleId: number, scheduleName: string, prompt: 
 
   try {
     // 使用 llm CLI 執行對話 - 使用最省 token 的設定
-    const response = await runLLMCommand(prompt, {
+    const llmResult = await runLLMCommand(prompt, {
       maxTurns: 1,              // 限制單輪對話
       outputFormat: 'text',     // 純文字輸出
       skipPermissions: true     // 跳過權限提示以減少互動
     })
     const durationMs = Date.now() - startTime
+    const response = llmResult.output
 
     // 解析 token 使用量 (從 response 中提取或估算)
     const tokenEstimate = estimateTokens(prompt, response)
@@ -816,29 +973,45 @@ async function executeLLMCode(scheduleId: number, scheduleName: string, prompt: 
   }
 }
 
-function runLLMCommand(prompt: string, options: LLMCodeOptions = {}): Promise<string> {
+async function runLLMCommand(prompt: string, options: LLMCodeOptions = {}): Promise<LLMCommandResult> {
+  const startTime = Date.now()
+
+  // Check CLI availability first
+  const cliAvailable = await checkClaudeCLIAvailable()
+
+  if (!cliAvailable) {
+    return {
+      output: '',
+      skipped: true,
+      skipReason: 'Claude CLI not available',
+      executionTime: 0
+    }
+  }
+
   return new Promise((resolve, reject) => {
     const args: string[] = ['-p', prompt]
 
-    // 輸出格式
+    // Output format
     args.push('--output-format', options.outputFormat || 'text')
 
-    // 權限模式 - Pro 訂閱下建議使用 plan 模式做最小對話
+    // Permission mode
     if (options.skipPermissions) {
       args.push('--dangerously-skip-permissions')
     }
 
-    // 限制對話輪數 - 減少 token 消耗
+    // Limit conversation turns to reduce token usage
     if (options.maxTurns) {
       args.push('--max-turns', options.maxTurns.toString())
     }
 
-    console.log(`[LLM] Running: claude ${args.join(' ')}`)
+    console.log(`[LLM] Running: ${CLAUDE_CLI_PATH} ${args.join(' ')}`)
+    console.log(`[LLM] Working dir: ${CLAUDE_HOME}`)
 
-    // 使用 llm CLI 執行
-    const llm = spawn('claude', args, {
+    // Spawn Claude CLI with custom environment and working directory
+    const llm = spawn(CLAUDE_CLI_PATH, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env }
+      env: buildClaudeEnv(),
+      cwd: CLAUDE_HOME
     })
 
     let stdout = ''
@@ -853,18 +1026,25 @@ function runLLMCommand(prompt: string, options: LLMCodeOptions = {}): Promise<st
     })
 
     llm.on('close', (code) => {
+      const executionTime = Date.now() - startTime
       if (code === 0) {
-        resolve(stdout.trim())
+        resolve({
+          output: stdout.trim(),
+          executionTime
+        })
       } else {
-        reject(new Error(stderr || `LLM exited with code ${code}`))
+        const errorMsg = stderr || `LLM exited with code ${code}`
+        console.error(`[LLM] Error:`, errorMsg)
+        reject(new Error(errorMsg))
       }
     })
 
     llm.on('error', (err) => {
+      console.error(`[LLM] Spawn error:`, err.message)
       reject(err)
     })
 
-    // 設定 30 秒超時
+    // Set 30 second timeout
     setTimeout(() => {
       llm.kill()
       reject(new Error('LLM command timeout after 30s'))
@@ -894,10 +1074,10 @@ function estimateTokens(input: string, output: string) {
 
 async function readHistory(limit = 100, project?: string, pathIndex = 0): Promise<HistoryEntry[]> {
   // Get configured paths from config table, fallback to default
-  let historyPath = join(homedir(), '.claude', 'history.jsonl')
+  let historyPath = getClaudePath('history.jsonl')
 
-  console.log('[ReadHistory] Default path:', historyPath)
-  console.log('[ReadHistory] Home dir:', homedir())
+  console.log('[ReadHistory] Using path:', historyPath)
+  console.log('[ReadHistory] Claude home:', CLAUDE_HOME)
   console.log('[ReadHistory] Checking config...')
 
   try {
@@ -1147,10 +1327,10 @@ function groupByDayWithSort(conversations: unknown[], sortOrder: 'asc' | 'desc' 
 // ============ Projects JSONL Import Functions ============
 
 function readProjectsJSONL(projectPath: string, sessionId: string): {
-  userMessages: Array<{uuid: string, content: string, timestamp: string, sessionId: string}>,
-  assistantMessages: Array<{uuid: string, parentUuid: string, content: string, timestamp: string, sessionId: string, usage: any}>
+  userMessages: Array<{ uuid: string, content: string, timestamp: string, sessionId: string }>,
+  assistantMessages: Array<{ uuid: string, parentUuid: string, content: string, timestamp: string, sessionId: string, usage: any }>
 } {
-  const filePath = join(homedir(), '.claude', 'projects', projectPath, `${sessionId}.jsonl`)
+  const filePath = join(getClaudePath('projects'), projectPath, `${sessionId}.jsonl`)
 
   if (!existsSync(filePath)) {
     console.warn(`[readProjectsJSONL] File not found: ${filePath}`)
@@ -1160,8 +1340,8 @@ function readProjectsJSONL(projectPath: string, sessionId: string): {
   const content = readFileSync(filePath, 'utf-8')
   const lines = content.split('\n').filter(l => l.trim())
 
-  const userMessages: Array<{uuid: string, content: string, timestamp: string, sessionId: string}> = []
-  const assistantMessages: Array<{uuid: string, parentUuid: string, content: string, timestamp: string, sessionId: string, usage: any}> = []
+  const userMessages: Array<{ uuid: string, content: string, timestamp: string, sessionId: string }> = []
+  const assistantMessages: Array<{ uuid: string, parentUuid: string, content: string, timestamp: string, sessionId: string, usage: any }> = []
 
   for (const line of lines) {
     try {
@@ -1267,7 +1447,42 @@ function setupSchedule(schedule: Schedule): void {
 }
 
 function initializeSchedules(): void {
-  const schedules = db.prepare('SELECT * FROM schedules WHERE enabled = 1').all() as Schedule[]
+  let schedules = db.prepare('SELECT * FROM schedules WHERE enabled = 1').all() as Schedule[]
+
+  // Auto-migration: If we detect the old 4AM default pattern, migrate to 3AM
+  const currentHours = schedules.map(s => s.hour).sort((a, b) => a - b)
+  const isOldDefault = currentHours.length === 5 && JSON.stringify(currentHours) === JSON.stringify([0, 4, 9, 14, 19])
+
+  if (isOldDefault) {
+    console.log('🔄 Detected old 4AM preset pattern. Migrating to new 3AM default...')
+    try {
+      const hours = [3, 8, 13, 18, 23]
+
+      db.transaction(() => {
+        db.prepare('DELETE FROM conversations WHERE execution_log_id IN (SELECT id FROM execution_logs WHERE schedule_id IS NOT NULL)').run()
+        db.prepare('DELETE FROM plans WHERE execution_log_id IN (SELECT id FROM execution_logs WHERE schedule_id IS NOT NULL)').run()
+        db.prepare('DELETE FROM execution_logs WHERE schedule_id IS NOT NULL').run()
+        db.prepare('DELETE FROM schedules').run()
+
+        const insert = db.prepare(`
+          INSERT INTO schedules (name, cron_expression, hour, minute, enabled, prompt)
+          VALUES (?, ?, ?, 0, 1, ?)
+        `)
+
+        for (const h of hours) {
+          const name = `Reset @ ${h.toString().padStart(2, '0')}:00`
+          const cronExpression = `0 ${h} * * *`
+          insert.run(name, cronExpression, h, MINIMAL_PROMPT)
+        }
+      })()
+
+      // Re-fetch schedules after migration
+      schedules = db.prepare('SELECT * FROM schedules WHERE enabled = 1').all() as Schedule[]
+      console.log('✅ Migration to 3AM preset complete')
+    } catch (e) {
+      console.error('❌ Migration to 3AM preset failed:', e)
+    }
+  }
 
   for (const schedule of schedules) {
     setupSchedule(schedule)
@@ -1563,12 +1778,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
       try {
         // 執行對話
-        const response = await runLLMCommand(prompt, {
+        const llmResult = await runLLMCommand(prompt, {
           maxTurns: 1,
           outputFormat: 'text',
           skipPermissions: true
         })
         const durationMs = Date.now() - startTime
+        const response = llmResult.output
 
         // 估算 token
         const tokenEstimate = estimateTokens(prompt, response)
@@ -1634,7 +1850,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     if (path === '/api/presets/5hour' && method === 'POST') {
       try {
         const body = await parseBody(req)
-        const { startHour = 4 } = body as { startHour?: number }
+        const { startHour = 3 } = body as { startHour?: number }
 
         // Validate input
         if (typeof startHour !== 'number' || startHour < 0 || startHour > 23) {
@@ -1656,6 +1872,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
         // BEGIN TRANSACTION
         const transaction = db.transaction(() => {
+          // Step 0: Delete related entries in dependent tables (foreign key constraint)
+          db.prepare('DELETE FROM conversations WHERE execution_log_id IN (SELECT id FROM execution_logs WHERE schedule_id IS NOT NULL)').run()
+          db.prepare('DELETE FROM plans WHERE execution_log_id IN (SELECT id FROM execution_logs WHERE schedule_id IS NOT NULL)').run()
+
           // Step 1: Delete related execution logs first (foreign key constraint)
           db.prepare('DELETE FROM execution_logs WHERE schedule_id IS NOT NULL').run()
 
