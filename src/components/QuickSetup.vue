@@ -8,7 +8,7 @@ import { Zap, Clock } from 'lucide-vue-next'
 const { t } = useI18n()
 const store = useSchedulerStore()
 const { success, error: showError } = useToast()
-const startHour = ref(4)
+const startHour = ref(3)
 const setting = ref(false)
 
 const previewHours = computed(() => {
