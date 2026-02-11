@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "start": "bash runme",
     "dev": "vite",
     "dev:docker": "concurrently \"npm run server\" \"vite --host 0.0.0.0\"",
     "build": "vue-tsc && vite build",

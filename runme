@@ -1,1 +1,41 @@
-npx concurrently "tsx watch server/index.ts" "vite"
+#!/bin/bash
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Export user/group ID for Docker volume permission matching
+export USER_ID=$(id -u)
+export GROUP_ID=$(id -g)
+
+# Auto-detect latest Claude CLI version for Docker volume mount
+CLAUDE_VERSIONS_DIR="${HOME}/.local/share/claude/versions"
+if [ -d "$CLAUDE_VERSIONS_DIR" ]; then
+  CLAUDE_CLI_VERSION=$(ls -v "$CLAUDE_VERSIONS_DIR" 2>/dev/null | tail -1)
+  if [ -n "$CLAUDE_CLI_VERSION" ]; then
+    export CLAUDE_CLI_VERSION
+    echo "Detected Claude CLI version: $CLAUDE_CLI_VERSION"
+  fi
+fi
+
+# Validate Claude mount prerequisites
+if [ -f "$SCRIPT_DIR/scripts/validate-claude-mount.sh" ]; then
+  bash "$SCRIPT_DIR/scripts/validate-claude-mount.sh" || {
+    echo "WARNING: Claude CLI validation failed. Continuing anyway..."
+  }
+fi
+
+# Start Docker Compose (build if needed)
+cd "$SCRIPT_DIR"
+docker compose up --build -d
+
+echo ""
+echo "Services starting..."
+echo "  Frontend: http://localhost:5173"
+echo "  API:      http://localhost:3000"
+echo ""
+echo "Follow logs: docker compose logs -f app-dev"
+echo "Stop:        docker compose down"
+echo ""
+
+# Follow logs by default
+docker compose logs -f app-dev
