@@ -4,31 +4,30 @@
 # ============================================
 # Stage 1: Development Environment
 # ============================================
-FROM node:20-alpine AS development
+FROM node:20-slim AS development
 
 WORKDIR /app
 
-# Install necessary tools and Claude CLI compatibility libraries
-RUN apk add --no-cache \
+# Install necessary tools for native module compilation and Claude CLI
+RUN apt-get update && apt-get install -y \
     python3 \
     make \
     g++ \
-    libc6-compat \
-    libgcc \
-    libstdc++
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 # Create nodejs user and setup Claude directories
 ARG USER_ID=1001
 ARG GROUP_ID=1001
-RUN addgroup -g ${GROUP_ID} -S nodejs && \
-    adduser -S nodejs -u ${USER_ID} -G nodejs && \
+RUN groupadd -g ${GROUP_ID} nodejs && \
+    useradd -m -u ${USER_ID} -g nodejs nodejs && \
     mkdir -p /home/nodejs/.claude /home/nodejs/.local/share/claude && \
     chown -R nodejs:nodejs /home/nodejs
 
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
+# Install dependencies (prebuilt better-sqlite3 binaries available for Debian/glibc)
 RUN npm ci
 
 # Copy application code
@@ -47,15 +46,16 @@ CMD ["npm", "run", "dev"]
 # ============================================
 # Stage 2: Build Stage
 # ============================================
-FROM node:20-alpine AS builder
+FROM node:20-slim AS builder
 
 WORKDIR /app
 
 # Install build dependencies
-RUN apk add --no-cache \
+RUN apt-get update && apt-get install -y \
     python3 \
     make \
-    g++
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy package files
 COPY package*.json ./
@@ -72,14 +72,15 @@ RUN npm run build
 # ============================================
 # Stage 3: Production Environment
 # ============================================
-FROM node:20-alpine AS production
+FROM node:20-slim AS production
 
 WORKDIR /app
 
 # Install runtime dependencies only
-RUN apk add --no-cache \
+RUN apt-get update && apt-get install -y \
     dumb-init \
-    curl
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy package files
 COPY package*.json ./
@@ -96,8 +97,8 @@ COPY server ./server
 COPY src ./src
 
 # Create non-root user
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S nodejs -u 1001 && \
+RUN groupadd -g 1001 nodejs && \
+    useradd -m -u 1001 -g nodejs nodejs && \
     chown -R nodejs:nodejs /app
 
 USER nodejs
