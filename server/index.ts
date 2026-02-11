@@ -35,8 +35,16 @@ function getClaudePath(relativePath: string): string {
   return join(CLAUDE_HOME, relativePath)
 }
 
+// Extra project directories (comma-separated container paths)
+const EXTRA_PROJECTS_DIRS = (process.env.EXTRA_PROJECTS_DIRS || '').split(',').filter(Boolean)
+
+// Scripts directory for external TypeScript execution
+const SCRIPTS_DIR = process.env.SCRIPTS_DIR || '/data/scripts'
+
 console.log('[ClaudeConfig] CLI Path:', CLAUDE_CLI_PATH)
 console.log('[ClaudeConfig] Home:', CLAUDE_HOME)
+console.log('[ClaudeConfig] Extra Projects Dirs:', EXTRA_PROJECTS_DIRS)
+console.log('[ClaudeConfig] Scripts Dir:', SCRIPTS_DIR)
 
 // ============ Database Setup ============
 const dbPath = resolve(process.cwd(), 'scheduler.db')
@@ -435,6 +443,30 @@ async function checkClaudeCLIAvailable(): Promise<boolean> {
 
   return claudeCLICheckPromise
 }
+
+// ============ Claude Login State ============
+let claudeLoginProcess: ReturnType<typeof spawn> | null = null
+let claudeLoginState: {
+  status: 'idle' | 'waiting_for_url' | 'waiting_for_auth' | 'success' | 'failed'
+  authUrl: string | null
+  output: string
+  error: string | null
+  startedAt: string | null
+} = {
+  status: 'idle', authUrl: null, output: '', error: null, startedAt: null
+}
+
+// ============ Script Execution State ============
+interface ScriptExecution {
+  proc: ReturnType<typeof spawn>
+  output: string
+  error: string
+  status: 'running' | 'completed' | 'failed' | 'timeout'
+  startedAt: string
+  exitCode: number | null
+  scriptName: string
+}
+const activeScriptExecutions = new Map<string, ScriptExecution>()
 
 /**
  * Extract meaningful title from plan content
@@ -3273,6 +3305,322 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
           metricsInterval: parseInt(process.env.METRICS_INTERVAL_MS || '30000'),
           gitTrackingInterval: parseInt(process.env.GIT_TRACKING_INTERVAL_MS || '60000'),
           dependencyCheckSchedule: process.env.DEPENDENCY_CHECK_CRON || '0 9 * * *'
+        }
+      })
+      return
+    }
+
+    // ============ Claude Auth Endpoints ============
+
+    // GET /api/claude/auth-status - Check Claude CLI authentication status
+    if (path === '/api/claude/auth-status' && method === 'GET') {
+      const credentialsPath = getClaudePath('.credentials.json')
+      const cliExists = existsSync(CLAUDE_CLI_PATH)
+      const credentialsExist = existsSync(credentialsPath)
+
+      let credentialsValid = false
+      let accountInfo: { email?: string; expiresAt?: string } = {}
+
+      if (credentialsExist) {
+        try {
+          const creds = JSON.parse(readFileSync(credentialsPath, 'utf-8'))
+          credentialsValid = !!(creds.claudeAiOauth?.accessToken || creds.accessToken)
+          accountInfo.email = creds.email || creds.claudeAiOauth?.email
+          accountInfo.expiresAt = creds.claudeAiOauth?.expiresAt || creds.expiresAt
+        } catch (e) {
+          credentialsValid = false
+        }
+      }
+
+      jsonResponse(res, {
+        success: true,
+        data: {
+          cliAvailable: cliExists,
+          authenticated: credentialsValid,
+          credentialsPath,
+          cliPath: CLAUDE_CLI_PATH,
+          claudeHome: CLAUDE_HOME,
+          accountInfo
+        }
+      })
+      return
+    }
+
+    // POST /api/claude/login - Start claude login process
+    if (path === '/api/claude/login' && method === 'POST') {
+      if (claudeLoginProcess) {
+        claudeLoginProcess.kill()
+        claudeLoginProcess = null
+      }
+
+      claudeLoginState = {
+        status: 'waiting_for_url',
+        authUrl: null,
+        output: '',
+        error: null,
+        startedAt: new Date().toISOString()
+      }
+
+      const proc = spawn(CLAUDE_CLI_PATH, ['login'], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: buildClaudeEnv()
+      })
+      claudeLoginProcess = proc
+
+      proc.stdout.on('data', (data: Buffer) => {
+        const text = data.toString()
+        claudeLoginState.output += text
+        console.log('[ClaudeLogin] stdout:', text)
+        const urlMatch = text.match(/https:\/\/[^\s]+/)
+        if (urlMatch) {
+          claudeLoginState.authUrl = urlMatch[0]
+          claudeLoginState.status = 'waiting_for_auth'
+        }
+      })
+
+      proc.stderr.on('data', (data: Buffer) => {
+        const text = data.toString()
+        claudeLoginState.output += text
+        console.log('[ClaudeLogin] stderr:', text)
+        const urlMatch = text.match(/https:\/\/[^\s]+/)
+        if (urlMatch) {
+          claudeLoginState.authUrl = urlMatch[0]
+          claudeLoginState.status = 'waiting_for_auth'
+        }
+      })
+
+      proc.on('close', (code: number | null) => {
+        claudeLoginProcess = null
+        if (code === 0) {
+          claudeLoginState.status = 'success'
+          claudeCLIAvailable = null // Reset cache so next check picks up new credentials
+        } else {
+          claudeLoginState.status = 'failed'
+          claudeLoginState.error = `Login process exited with code ${code}`
+        }
+      })
+
+      // 5-minute timeout
+      setTimeout(() => {
+        if (claudeLoginProcess === proc) {
+          proc.kill()
+          claudeLoginProcess = null
+          claudeLoginState.status = 'failed'
+          claudeLoginState.error = 'Login process timed out after 5 minutes'
+        }
+      }, 300000)
+
+      jsonResponse(res, { success: true, message: 'Login process started' })
+      return
+    }
+
+    // GET /api/claude/login-status - Poll login process status
+    if (path === '/api/claude/login-status' && method === 'GET') {
+      jsonResponse(res, {
+        success: true,
+        data: {
+          status: claudeLoginState.status,
+          authUrl: claudeLoginState.authUrl,
+          error: claudeLoginState.error,
+          startedAt: claudeLoginState.startedAt
+        }
+      })
+      return
+    }
+
+    // POST /api/claude/login-cancel - Cancel ongoing login
+    if (path === '/api/claude/login-cancel' && method === 'POST') {
+      if (claudeLoginProcess) {
+        claudeLoginProcess.kill()
+        claudeLoginProcess = null
+      }
+      claudeLoginState = {
+        status: 'idle', authUrl: null, output: '', error: null, startedAt: null
+      }
+      jsonResponse(res, { success: true, message: 'Login cancelled' })
+      return
+    }
+
+    // ============ Claude Project Directories ============
+
+    // GET /api/claude/project-dirs - List available project directories
+    if (path === '/api/claude/project-dirs' && method === 'GET') {
+      const dirs: Array<{ path: string; exists: boolean; projectCount: number; source: string }> = []
+
+      const primaryDir = getClaudePath('projects')
+      const primaryExists = existsSync(primaryDir)
+      dirs.push({
+        path: primaryDir,
+        exists: primaryExists,
+        projectCount: primaryExists ? readdirSync(primaryDir).filter(f => {
+          try { return statSync(join(primaryDir, f)).isDirectory() } catch { return false }
+        }).length : 0,
+        source: 'claude_home'
+      })
+
+      for (const extraDir of EXTRA_PROJECTS_DIRS) {
+        const exists = existsSync(extraDir)
+        dirs.push({
+          path: extraDir,
+          exists,
+          projectCount: exists ? readdirSync(extraDir).filter(f => {
+            try { return statSync(join(extraDir, f)).isDirectory() } catch { return false }
+          }).length : 0,
+          source: 'extra_env'
+        })
+      }
+
+      jsonResponse(res, { success: true, data: { directories: dirs } })
+      return
+    }
+
+    // ============ Script Runner Endpoints ============
+
+    // GET /api/scripts - List TypeScript files in scripts directory
+    if (path === '/api/scripts' && method === 'GET') {
+      if (!existsSync(SCRIPTS_DIR)) {
+        jsonResponse(res, {
+          success: true,
+          data: { scripts: [], scriptsDir: SCRIPTS_DIR, available: false }
+        })
+        return
+      }
+
+      function scanScriptsDir(dir: string, prefix = ''): Array<{ name: string; path: string; size: number; mtime: string }> {
+        const results: Array<{ name: string; path: string; size: number; mtime: string }> = []
+        try {
+          const entries = readdirSync(dir)
+          for (const entry of entries) {
+            const fullPath = join(dir, entry)
+            const stat = statSync(fullPath)
+            if (stat.isDirectory()) {
+              results.push(...scanScriptsDir(fullPath, prefix ? `${prefix}/${entry}` : entry))
+            } else if (entry.endsWith('.ts') || entry.endsWith('.tsx')) {
+              results.push({
+                name: prefix ? `${prefix}/${entry}` : entry,
+                path: fullPath,
+                size: stat.size,
+                mtime: stat.mtime.toISOString()
+              })
+            }
+          }
+        } catch (e) {
+          console.error('[Scripts] Error scanning directory:', dir, e)
+        }
+        return results
+      }
+
+      const scripts = scanScriptsDir(SCRIPTS_DIR)
+      jsonResponse(res, {
+        success: true,
+        data: { scripts, scriptsDir: SCRIPTS_DIR, available: true }
+      })
+      return
+    }
+
+    // POST /api/scripts/execute - Execute a TypeScript file
+    if (path === '/api/scripts/execute' && method === 'POST') {
+      const body = await parseBody(req)
+      const { scriptName } = body as { scriptName: string }
+
+      if (!scriptName) {
+        jsonResponse(res, { success: false, error: 'scriptName is required' }, 400)
+        return
+      }
+
+      if (scriptName.includes('..') || scriptName.startsWith('/')) {
+        jsonResponse(res, { success: false, error: 'Invalid script name' }, 400)
+        return
+      }
+
+      const scriptPath = join(SCRIPTS_DIR, scriptName)
+      if (!existsSync(scriptPath)) {
+        jsonResponse(res, { success: false, error: `Script not found: ${scriptName}` }, 404)
+        return
+      }
+
+      const resolvedPath = resolve(scriptPath)
+      const resolvedScriptsDir = resolve(SCRIPTS_DIR)
+      if (!resolvedPath.startsWith(resolvedScriptsDir)) {
+        jsonResponse(res, { success: false, error: 'Access denied' }, 403)
+        return
+      }
+
+      const executionId = `exec_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+
+      const execution: ScriptExecution = {
+        proc: null as any,
+        output: '',
+        error: '',
+        status: 'running',
+        startedAt: new Date().toISOString(),
+        exitCode: null,
+        scriptName
+      }
+
+      const tsxPath = join(process.cwd(), 'node_modules', '.bin', 'tsx')
+      const proc = spawn(tsxPath, [resolvedPath], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, NODE_ENV: 'development' },
+        cwd: SCRIPTS_DIR
+      })
+
+      execution.proc = proc
+      activeScriptExecutions.set(executionId, execution)
+
+      proc.stdout.on('data', (data: Buffer) => {
+        execution.output += data.toString()
+      })
+
+      proc.stderr.on('data', (data: Buffer) => {
+        execution.error += data.toString()
+      })
+
+      proc.on('close', (code: number | null) => {
+        execution.status = code === 0 ? 'completed' : 'failed'
+        execution.exitCode = code
+        // Clean up after 10 minutes
+        setTimeout(() => {
+          activeScriptExecutions.delete(executionId)
+        }, 600000)
+      })
+
+      // 5-minute timeout
+      setTimeout(() => {
+        if (execution.status === 'running') {
+          proc.kill()
+          execution.status = 'timeout'
+          execution.error += '\nExecution timed out after 5 minutes'
+        }
+      }, 300000)
+
+      jsonResponse(res, {
+        success: true,
+        data: { executionId, scriptName, status: 'running' }
+      }, 201)
+      return
+    }
+
+    // GET /api/scripts/execution/:id - Get script execution status
+    if (path.match(/^\/api\/scripts\/execution\/[\w]+$/) && method === 'GET') {
+      const executionId = path.split('/').pop()!
+      const execution = activeScriptExecutions.get(executionId)
+
+      if (!execution) {
+        jsonResponse(res, { success: false, error: 'Execution not found' }, 404)
+        return
+      }
+
+      jsonResponse(res, {
+        success: true,
+        data: {
+          executionId,
+          scriptName: execution.scriptName,
+          status: execution.status,
+          output: execution.output,
+          error: execution.error,
+          startedAt: execution.startedAt,
+          exitCode: execution.exitCode
         }
       })
       return
