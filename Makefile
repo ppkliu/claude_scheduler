@@ -4,8 +4,8 @@
 .DEFAULT_GOAL := help
 
 # Variables
-DOCKER_COMPOSE_DEV := docker-compose
-DOCKER_COMPOSE_PROD := docker-compose -f docker-compose.prod.yml
+DOCKER_COMPOSE_DEV := docker compose
+DOCKER_COMPOSE_PROD := docker compose -f docker-compose.prod.yml
 SCRIPT_DEV := ./scripts/dev.sh
 SCRIPT_PROD := ./scripts/prod.sh
 

@@ -46,7 +46,7 @@ check_docker() {
 }
 
 check_docker_compose() {
-    if ! command -v docker-compose &> /dev/null; then
+    if ! docker compose version &> /dev/null; then
         print_error "Docker Compose is not installed. Please install Docker Compose first."
         exit 1
     fi
@@ -77,7 +77,7 @@ EOF
 
 build_image() {
     print_header "Building Production Docker Image"
-    docker-compose -f "${COMPOSE_FILE}" build --no-cache
+    docker compose -f "${COMPOSE_FILE}" build --no-cache
     print_success "Production Docker image built successfully"
 }
 
@@ -91,27 +91,27 @@ create_data_dirs() {
 start_services() {
     print_header "Starting Production Environment"
     if [ -f "${ENV_FILE}" ]; then
-        docker-compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" up -d
+        docker compose -f "${COMPOSE_FILE}" --env-file "${ENV_FILE}" up -d
     else
-        docker-compose -f "${COMPOSE_FILE}" up -d
+        docker compose -f "${COMPOSE_FILE}" up -d
     fi
     print_success "Production environment started"
 }
 
 stop_services() {
     print_header "Stopping Production Environment"
-    docker-compose -f "${COMPOSE_FILE}" down
+    docker compose -f "${COMPOSE_FILE}" down
     print_success "Production environment stopped"
 }
 
 show_status() {
     print_header "Service Status"
-    docker-compose -f "${COMPOSE_FILE}" ps
+    docker compose -f "${COMPOSE_FILE}" ps
 }
 
 show_logs() {
     print_header "Production Logs"
-    docker-compose -f "${COMPOSE_FILE}" logs -f app
+    docker compose -f "${COMPOSE_FILE}" logs -f app
 }
 
 health_check() {
@@ -162,7 +162,7 @@ show_info() {
     echo "  • Environment: ${ENV_FILE}"
     echo ""
     echo -e "${GREEN}Useful Commands:${NC}"
-    echo "  • View logs: docker-compose -f ${COMPOSE_FILE} logs -f"
+    echo "  • View logs: docker compose -f ${COMPOSE_FILE} logs -f"
     echo "  • Stop services: ./prod.sh stop"
     echo "  • Restart services: ./prod.sh restart"
     echo "  • Backup database: ./prod.sh backup"
@@ -209,7 +209,7 @@ main() {
 
         restart)
             print_header "Restarting Production Environment"
-            docker-compose -f "${COMPOSE_FILE}" restart
+            docker compose -f "${COMPOSE_FILE}" restart
             print_success "Production environment restarted"
             show_status
             ;;
@@ -239,7 +239,7 @@ main() {
         update)
             print_header "Updating Production Environment"
             build_image
-            docker-compose -f "${COMPOSE_FILE}" up -d
+            docker compose -f "${COMPOSE_FILE}" up -d
             print_success "Production environment updated"
             show_status
             ;;
@@ -251,7 +251,7 @@ main() {
 
         clean)
             print_header "Cleaning Up (Keeping data)"
-            docker-compose -f "${COMPOSE_FILE}" down
+            docker compose -f "${COMPOSE_FILE}" down
             print_success "Docker containers stopped and removed"
             ;;
 
@@ -260,7 +260,7 @@ main() {
             read -p "⚠️  This will delete all data! Are you sure? (y/N) " -n 1 -r
             echo
             if [[ $REPLY =~ ^[Yy]$ ]]; then
-                docker-compose -f "${COMPOSE_FILE}" down -v
+                docker compose -f "${COMPOSE_FILE}" down -v
                 rm -rf "${PROJECT_DIR}/data"
                 print_success "All containers, volumes, and data removed"
             else

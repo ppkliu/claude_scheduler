@@ -45,7 +45,7 @@ check_docker() {
 }
 
 check_docker_compose() {
-    if ! command -v docker-compose &> /dev/null; then
+    if ! docker compose version &> /dev/null; then
         print_error "Docker Compose is not installed. Please install Docker Compose first."
         exit 1
     fi
@@ -54,19 +54,33 @@ check_docker_compose() {
 
 build_image() {
     print_header "Building Docker Image"
-    docker-compose -f "${COMPOSE_FILE}" build --no-cache
+    docker compose -f "${COMPOSE_FILE}" build --no-cache
     print_success "Docker image built successfully"
+}
+
+detect_claude_version() {
+    local versions_dir="${HOME}/.local/share/claude/versions"
+    if [ -d "$versions_dir" ]; then
+        CLAUDE_CLI_VERSION=$(ls -v "$versions_dir" 2>/dev/null | tail -1)
+        if [ -n "$CLAUDE_CLI_VERSION" ]; then
+            export CLAUDE_CLI_VERSION
+            print_success "Detected Claude CLI version: ${CLAUDE_CLI_VERSION}"
+        fi
+    fi
+    export USER_ID=$(id -u)
+    export GROUP_ID=$(id -g)
 }
 
 start_services() {
     print_header "Starting Development Environment"
-    docker-compose -f "${COMPOSE_FILE}" up -d
+    detect_claude_version
+    docker compose -f "${COMPOSE_FILE}" up -d
     print_success "Development environment started"
 }
 
 show_status() {
     print_header "Service Status"
-    docker-compose -f "${COMPOSE_FILE}" ps
+    docker compose -f "${COMPOSE_FILE}" ps
 }
 
 wait_for_services() {
@@ -98,9 +112,9 @@ show_info() {
     echo "  • API Server: ${BLUE}http://localhost:3000${NC}"
     echo ""
     echo -e "${GREEN}Useful Commands:${NC}"
-    echo "  • View logs: docker-compose logs -f app-dev"
-    echo "  • Stop services: docker-compose down"
-    echo "  • Restart services: docker-compose restart"
+    echo "  • View logs: docker compose logs -f app-dev"
+    echo "  • Stop services: docker compose down"
+    echo "  • Restart services: docker compose restart"
     echo "  • Access shell: docker exec -it ${CONTAINER_NAME} sh"
     echo ""
 }
@@ -124,25 +138,25 @@ main() {
 
             echo -e "${GREEN}Development environment is ready!${NC}"
             echo "Starting to follow logs (Press Ctrl+C to stop)..."
-            docker-compose -f "${COMPOSE_FILE}" logs -f app-dev
+            docker compose -f "${COMPOSE_FILE}" logs -f app-dev
             ;;
 
         stop)
             print_header "Stopping Development Environment"
-            docker-compose -f "${COMPOSE_FILE}" down
+            docker compose -f "${COMPOSE_FILE}" down
             print_success "Development environment stopped"
             ;;
 
         restart)
             print_header "Restarting Development Environment"
-            docker-compose -f "${COMPOSE_FILE}" restart
+            docker compose -f "${COMPOSE_FILE}" restart
             print_success "Development environment restarted"
             show_status
             ;;
 
         logs)
             print_header "Following Logs"
-            docker-compose -f "${COMPOSE_FILE}" logs -f app-dev
+            docker compose -f "${COMPOSE_FILE}" logs -f app-dev
             ;;
 
         shell)
@@ -162,7 +176,7 @@ main() {
 
         clean)
             print_header "Cleaning Up"
-            docker-compose -f "${COMPOSE_FILE}" down -v
+            docker compose -f "${COMPOSE_FILE}" down -v
             print_success "Docker containers and volumes cleaned"
             ;;
 
