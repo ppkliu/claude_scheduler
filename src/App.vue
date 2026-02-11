@@ -14,14 +14,16 @@ import SettingsModal from './components/SettingsModal.vue'
 import ToastContainer from './components/ToastContainer.vue'
 import PlanPanel from './components/PlanPanel.vue'
 import DeploymentMonitor from './components/deployment/DeploymentMonitor.vue'
-import { Clock, Plus, Zap, MessageCircle, Calendar, Settings, FileText, Activity } from 'lucide-vue-next'
+import ClaudeAuthPanel from './components/ClaudeAuthPanel.vue'
+import ScriptRunnerPanel from './components/ScriptRunnerPanel.vue'
+import { Clock, Plus, Zap, MessageCircle, Calendar, Settings, FileText, Activity, Terminal } from 'lucide-vue-next'
 
 const { t } = useI18n()
 const { initLocale } = useLocale()
 const store = useSchedulerStore()
 const showAddModal = ref(false)
 const showSettingsModal = ref(false)
-const mainTab = ref<'scheduler' | 'conversations' | 'plans' | 'deployment'>('scheduler')
+const mainTab = ref<'scheduler' | 'conversations' | 'plans' | 'deployment' | 'scripts'>('scheduler')
 const schedulerSubTab = ref<'schedules' | 'logs'>('schedules')
 
 onMounted(async () => {
@@ -53,14 +55,14 @@ onMounted(async () => {
         <div class="flex items-center justify-between h-16">
           <div class="flex items-center gap-3">
             <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-primary/20 to-primary/5 border border-primary/30 flex items-center justify-center">
-              <component :is="mainTab === 'scheduler' ? Calendar : mainTab === 'conversations' ? MessageCircle : mainTab === 'plans' ? FileText : Activity" class="w-5 h-5 text-primary" />
+              <component :is="mainTab === 'scheduler' ? Calendar : mainTab === 'conversations' ? MessageCircle : mainTab === 'plans' ? FileText : mainTab === 'scripts' ? Terminal : Activity" class="w-5 h-5 text-primary" />
             </div>
             <div>
               <h1 class="text-lg font-semibold tracking-tight">
-                {{ mainTab === 'scheduler' ? t('app.title') : mainTab === 'conversations' ? t('app.conversationsTitle') : mainTab === 'plans' ? t('app.plansTitle') : t('nav.deployment') }}
+                {{ mainTab === 'scheduler' ? t('app.title') : mainTab === 'conversations' ? t('app.conversationsTitle') : mainTab === 'plans' ? t('app.plansTitle') : mainTab === 'scripts' ? t('scripts.title') : t('nav.deployment') }}
               </h1>
               <p class="text-xs text-muted-foreground">
-                {{ mainTab === 'scheduler' ? t('app.subtitle') : mainTab === 'conversations' ? t('app.conversationsSubtitle') : mainTab === 'plans' ? t('app.plansSubtitle') : t('deployment.subtitle') || 'Monitor and manage automated deployments' }}
+                {{ mainTab === 'scheduler' ? t('app.subtitle') : mainTab === 'conversations' ? t('app.conversationsSubtitle') : mainTab === 'plans' ? t('app.plansSubtitle') : mainTab === 'scripts' ? t('scripts.description') : t('deployment.subtitle') || 'Monitor and manage automated deployments' }}
               </p>
             </div>
           </div>
@@ -140,6 +142,18 @@ onMounted(async () => {
             <Activity class="w-5 h-5" />
             {{ t('nav.deployment') }}
           </button>
+          <button
+            @click="mainTab = 'scripts'"
+            :class="[
+              'inline-flex items-center gap-2 px-6 py-3 border-b-2 font-medium text-sm transition-all',
+              mainTab === 'scripts'
+                ? 'border-primary text-primary'
+                : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
+            ]"
+          >
+            <Terminal class="w-5 h-5" />
+            {{ t('nav.scripts') }}
+          </button>
         </div>
       </div>
     </div>
@@ -150,6 +164,9 @@ onMounted(async () => {
       <div v-if="mainTab === 'scheduler'" class="space-y-8 animate-fade-in">
         <!-- Status Overview -->
         <StatusPanel />
+
+        <!-- Claude Auth Status -->
+        <ClaudeAuthPanel />
 
         <!-- Quick Chat -->
         <QuickChatPanel />
@@ -220,6 +237,11 @@ onMounted(async () => {
       <!-- DEPLOYMENT TAB CONTENT -->
       <div v-else-if="mainTab === 'deployment'" class="animate-fade-in">
         <DeploymentMonitor />
+      </div>
+
+      <!-- SCRIPTS TAB CONTENT -->
+      <div v-else-if="mainTab === 'scripts'" class="animate-fade-in">
+        <ScriptRunnerPanel />
       </div>
     </main>
 

@@ -12,6 +12,7 @@ export default {
     conversations: '對話記錄管理',
     plans: '計劃檔案',
     deployment: '部署監控',
+    scripts: '腳本執行',
     addSchedule: '新增排程'
   },
   status: {
@@ -184,6 +185,39 @@ export default {
     buildFailed: '失敗',
     buildPending: '待處理',
     buildBuilding: '構建中'
+  },
+  claudeAuth: {
+    title: 'Claude 認證',
+    description: '管理 Claude CLI 認證以用於排程執行',
+    authenticated: '已認證',
+    notAuthenticated: '未認證',
+    cliNotFound: '找不到 Claude CLI',
+    login: '登入',
+    cancel: '取消登入',
+    refresh: '重新整理',
+    waitingForUrl: '正在啟動登入流程...',
+    openUrl: '請在瀏覽器中開啟以下網址完成認證：',
+    waitingForAuth: '等待認證完成...',
+    success: '登入成功！',
+    failed: '登入失敗',
+    copyUrl: '複製網址'
+  },
+  scripts: {
+    title: '腳本執行器',
+    description: '執行掛載腳本目錄中的 TypeScript 檔案',
+    notAvailable: '腳本目錄未掛載。請在 docker-compose.yml 中設定 SCRIPTS_DIR。',
+    noScripts: '未找到 TypeScript 檔案',
+    execute: '執行',
+    running: '執行中...',
+    completed: '已完成',
+    failed: '失敗',
+    timeout: '逾時',
+    output: '輸出',
+    errors: '錯誤',
+    exitCode: '結束代碼',
+    refresh: '重新整理',
+    size: '大小',
+    modified: '修改時間'
   },
   settings: {
     title: '設定',

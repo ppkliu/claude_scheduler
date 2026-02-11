@@ -12,6 +12,7 @@ export default {
     conversations: 'Conversations',
     plans: 'Plans',
     deployment: 'Deployment',
+    scripts: 'Scripts',
     addSchedule: 'Add Schedule'
   },
   status: {
@@ -184,6 +185,39 @@ export default {
     buildFailed: 'Failed',
     buildPending: 'Pending',
     buildBuilding: 'Building'
+  },
+  claudeAuth: {
+    title: 'Claude Authentication',
+    description: 'Manage Claude CLI authentication for scheduled executions',
+    authenticated: 'Authenticated',
+    notAuthenticated: 'Not Authenticated',
+    cliNotFound: 'Claude CLI Not Found',
+    login: 'Login',
+    cancel: 'Cancel Login',
+    refresh: 'Refresh',
+    waitingForUrl: 'Starting login process...',
+    openUrl: 'Open the following URL in your browser to complete authentication:',
+    waitingForAuth: 'Waiting for authentication to complete...',
+    success: 'Login successful!',
+    failed: 'Login failed',
+    copyUrl: 'Copy URL'
+  },
+  scripts: {
+    title: 'Script Runner',
+    description: 'Execute TypeScript files from the mounted scripts directory',
+    notAvailable: 'Scripts directory is not mounted. Configure SCRIPTS_DIR in docker-compose.yml.',
+    noScripts: 'No TypeScript files found',
+    execute: 'Execute',
+    running: 'Running...',
+    completed: 'Completed',
+    failed: 'Failed',
+    timeout: 'Timed Out',
+    output: 'Output',
+    errors: 'Errors',
+    exitCode: 'Exit Code',
+    refresh: 'Refresh',
+    size: 'Size',
+    modified: 'Modified'
   },
   settings: {
     title: 'Settings',
