@@ -1035,6 +1035,7 @@ async function runLLMCommand(prompt: string, options: LLMCodeOptions = {}): Prom
       } else {
         const errorMsg = stderr || `LLM exited with code ${code}`
         console.error(`[LLM] Error:`, errorMsg)
+        console.error(`[LLM] Exit code: ${code}, Duration: ${executionTime}ms, Stdout length: ${stdout.length}, Stderr: ${stderr?.substring(0, 200) || '(empty)'}`)
         reject(new Error(errorMsg))
       }
     })
@@ -2064,7 +2065,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     // GET /api/conversations/projects/list - 列出所有可用專案
     if (path === '/api/conversations/projects/list' && method === 'GET') {
       try {
-        const projectsDir = join(homedir(), '.claude', 'projects')
+        const projectsDir = getClaudePath('projects')
 
         if (!existsSync(projectsDir)) {
           jsonResponse(res, { success: true, data: [] }, 200)
@@ -2364,7 +2365,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       const projectPath = params.get('projectPath')
 
       try {
-        const projectsDir = join(homedir(), '.claude', 'projects')
+        const projectsDir = getClaudePath('projects')
 
         if (!existsSync(projectsDir)) {
           jsonResponse(res, {
@@ -2444,7 +2445,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
       try {
         console.log('[ImportProjects] Starting import process...', { projectPath, limit })
-        const projectsDir = join(homedir(), '.claude', 'projects')
+        const projectsDir = getClaudePath('projects')
 
         // 檢查 projects 目錄是否存在
         if (!existsSync(projectsDir)) {
